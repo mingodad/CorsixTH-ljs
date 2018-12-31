@@ -1,0 +1,185 @@
+/* Copyright (c) 2010 Sam Wong
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Calls Dispatcher Window
+class ("UICallsDispatcher") (UIResizable);
+
+//-@type UICallsDispatcher
+var UICallsDispatcher = _G["UICallsDispatcher"];
+
+var col_bg = {
+  red = 154,
+  green = 146,
+  blue = 198,
+};
+
+var col_button = {
+  red = 84,
+  green = 200,
+  blue = 84,
+};
+
+var col_shadow = {
+  red = 134,
+  green = 126,
+  blue = 178,
+};
+
+function UICallsDispatcher::UICallsDispatcher(ui) {
+  var app = ui.app;
+  this->UIResizable(ui, 320, 350, col_bg);
+  this.ui = ui;
+  this.dispatcher = app.world.dispatcher;
+  this.on_top = false;
+  this.esc_closes = true;
+  this.resizable = false;
+
+  this.call_list = {};
+  this.list_table = {};
+  this.rows_shown = 0;
+  this->createControls();
+  this->setDefaultPosition(0.05, 0.05);
+
+  this.default_button_sound = "selectx.wav";
+
+  this.dispatcher->addChangeCallback(this.update, this);
+  this->update();
+}
+
+var row_height = 20;
+var window_margin = 15;
+
+function UICallsDispatcher::createControls() {
+  var rows = math.floor((this.height - window_margin * 3 - 60) / row_height);
+
+  if( rows != this.rows_shown ) {
+    var function assigned_factory(num) {
+      return /*persistable:calls_dispatcher_assigned_button*/ function(window) {
+        window->itemButtonClicked(num);
+      };
+    }
+    var function task_factory(num) {
+      return /*persistable:calls_dispatcher_task_button*/ function(window) {
+        window->itemButtonClicked(num);
+      };
+    }
+    var callback = /*persistable:calls_dispatcher_scrollbar*/ function() {
+      this->scrollbarChange();
+    };
+
+    this.rows_shown = rows;
+    this.list_table = {};
+    var y = window_margin;
+    for( i = 1, rows, 1 ) {
+      var assigned_panel = this->addBevelPanel(window_margin, y, 20, row_height, col_button);
+      var assigned_button = assigned_panel->makeButton(0, 0, 20, row_height, null, assigned_factory(i))
+        ->setTooltip(_S.tooltip.calls_dispatcher.assigned);
+      var task_panel = this->addBevelPanel(50, y, this.width - 50 - 40 - window_margin, row_height, col_bg);
+      var task_button = task_panel->makeButton(0, 0, this.width - 50 - 40 - window_margin, row_height, null, task_factory(i))
+        ->setTooltip(_S.tooltip.calls_dispatcher.task);
+      table.insert(this.list_table, {
+        assigned_panel = assigned_panel,
+        assigned_button = assigned_button,
+        task_panel = task_panel,
+        task_button = task_button,
+      });
+      y +=   row_height;
+    }
+    this.summary_panel = this->addColourPanel(50, y + 10, this.width - 50 - 40 - window_margin, 20,
+                                             col_bg.red, col_bg.green, col_bg.blue);
+    this.scrollbar = this->addColourPanel(this.width - window_margin - 20, window_margin, 20, row_height * rows,
+                                         col_shadow.red, col_shadow.green, col_shadow.blue)
+                         ->makeScrollbar(col_bg, callback, 1, 1, 10, 1);
+    this.close_button = this->addBevelPanel(window_margin, y + 20 + window_margin, this.width - 2 * window_margin, 40, col_bg)->setLabel(_S.calls_dispatcher.close)
+      ->makeButton(0, 0, this.width - 2 * window_margin, 40, null, this.close)->setTooltip(_S.tooltip.calls_dispatcher.close);
+  }
+}
+
+function UICallsDispatcher::update() {
+  this.call_list = {};
+  var assigned = 0;
+  for( _, queue in pairs(this.dispatcher.call_queue) ) {
+    for( _, call in pairs(queue) ) {
+      table.insert(this.call_list, call);
+      if( call.assigned ) {
+        ++assigned    ;
+      }
+    }
+  }
+  table.sort(this.call_list,
+    function(a,b) {
+      if( a.created == null || b.created == null ) { return false; }
+      return a.created < b.created;
+    }
+  );
+
+  this.summary_panel->setLabel(_S.calls_dispatcher.summary->format(#this.call_list, assigned), null, "left");
+  this.scrollbar->setRange(1, math.max(1, #this.call_list), this.rows_shown, this.scrollbar.value);
+  this->scrollbarChange();
+}
+
+function UICallsDispatcher::scrollToEntity(entity) {
+  var x, y = this.ui.app.map->WorldToScreen(entity.tile_x, entity.tile_y);
+  var px, py = entity.th->getMarker();
+  this.ui->scrollMapTo(x + px, y + py);
+}
+
+function UICallsDispatcher::scrollToRoom(room) {
+  var x, y = this.ui.app.map->WorldToScreen(room.x + room.width / 2, room.y + room.height / 2);
+  this.ui->scrollMapTo(x, y);
+}
+
+function UICallsDispatcher::itemButtonClicked(index) {
+  var call = this.call_list[index + this.scrollbar.value - 1];
+  if( call && call.assigned ) {
+    this.ui->addWindow(UIStaff(this.ui, call.assigned));
+  }
+  if( call && call.object ) {
+    if( class.is(call.object, Room) ) {
+      this->scrollToRoom(call.object);
+    } else if( class.is(call.object, Entity) ) {
+      this->scrollToEntity(call.object);
+    }
+  }
+}
+
+function UICallsDispatcher::scrollbarChange() {
+  var scroll_pos = this.scrollbar.value;
+  for( i = 1, this.rows_shown, 1 ) {
+    var call = this.call_list[i + scroll_pos - 1];
+    var row = this.list_table[i];
+    if( call ) {
+      row.assigned_panel->setLabel(call.assigned && "@" || '');
+      row.assigned_button->enable(call.assigned && true || false);
+      row.task_panel->setLabel((call.description && call.description || call.key), null, "left");
+      row.task_button->enable(true);
+    } else {
+      row.assigned_panel->setLabel("");
+      row.task_panel->setLabel("");
+      row.assigned_button->enable(false);
+      row.task_button->enable(false);
+    }
+  }
+}
+
+function UICallsDispatcher::close() {
+  this.dispatcher->removeChangeCallback(this.update);
+  Window.close(this);
+}

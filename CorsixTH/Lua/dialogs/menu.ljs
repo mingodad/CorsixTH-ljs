@@ -1,0 +1,790 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var ipairs, math_floor, unpack, select, assert
+    = ipairs, math.floor, unpack, select, assert;
+var TH = require("TH");
+
+//! The ingame menu bar which sits (nominally hidden) at the top of the screen.
+class ("UIMenuBar") (Window);
+
+//-@type UIMenuBar
+var UIMenuBar = _G["UIMenuBar"];
+
+function UIMenuBar::UIMenuBar(ui, map_editor) {
+  this->Window();
+
+  var app = ui.app;
+  this.ui = ui;
+  this.on_top = true;
+  this.x = 0;
+  this.y = 0;
+  this.width = app.config.width;
+  this.height = 16;
+  this.visible = false;
+  this.panel_sprites = app.gfx->loadSpriteTable("Data", "PullDV", true);
+  this.white_font = app.gfx->loadFont("QData", "Font01V");
+  this.blue_font = app.gfx->loadFont("QData", "Font02V");
+  // The list of top-level menus, from left to right
+  this.menus = {};
+  // The menu which the cursor was most recently over
+  // This should be present in self.open_menus, else it won't be drawn
+  this.active_menu = false;
+  // The list of menus which should be displayed
+  // This list satifies: open_menus[x] == nil or open_menus[x].level == x
+  this.open_menus = {};
+
+  if( map_editor ) {
+    this->makeMapeditorMenu(app);
+  } else {
+    this->makeGameMenu(app);
+  }
+}
+
+function UIMenuBar::onTick() {
+  if( #this.open_menus > 0 ) {
+    // If the deepest menu has no need to be open, close it after a short time
+    // It needs to be open if the cursor is over it, or the cursor is over the
+    // item in its parent corresponding to it.
+    var deepest = this.open_menus[#this.open_menus];
+    var parent = deepest.parent;
+    if( deepest == this.active_menu ||
+        (parent && parent == this.active_menu && parent.items[parent.hover_index] &&
+        parent.items[parent.hover_index].submenu == deepest) ) {
+      this.menu_disappear_counter = null;
+    } else {
+      if( this.menu_disappear_counter == 0 ) {
+        this.menu_disappear_counter = null;
+        var close_to = this.active_menu && this.active_menu.level || 0;
+        for( i = #this.open_menus, close_to + 1, -1 ) {
+          this.open_menus[i] = null;
+        }
+      } else {
+        this.menu_disappear_counter = (this.menu_disappear_counter || 26) - 1;
+      }
+    }
+  }
+  if( this.disappear_counter ) {
+    if( this.disappear_counter == 0 ) {
+      for( i = #this.open_menus, 1, -1 ) {
+        this.open_menus[i] = null;
+      }
+      this.active_menu = false;
+      this.visible = false;
+      this.disappear_counter = null;
+      if( this.on_top ) {
+        this.ui->sendToBottom(this);
+        this.on_top = false;
+      }
+    } else {
+      this.disappear_counter = this.disappear_counter - 1;
+    }
+  }
+  Window.onTick(this);
+}
+
+function UIMenuBar::onChangeResolution() {
+  this.width = this.ui.app.config.width;
+}
+
+function UIMenuBar::onChangeLanguage() {
+  var function check_size(menu) {
+    menu.has_size = false;
+    for( _, item in ipairs(menu.items) ) {
+      if( item.submenu ) {
+        check_size(item.submenu);
+      }
+    }
+  }
+  for( _, menu in ipairs(this.menus) ) {
+    check_size(menu.menu);
+  }
+}
+
+var function assign_menu_levels(menu, level) {
+  menu.level = level;
+  for( _, item in ipairs(menu.items) ) {
+    if( item.submenu ) {
+      assign_menu_levels(item.submenu, level + 1);
+    }
+  }
+}
+
+//! Add a menu to the menu bar.
+//!param title Title of the menu (at the bar).
+//!param menu Menu to add.
+function UIMenuBar::addMenu(title, menu) {
+  assign_menu_levels(menu, 1);
+  var menu_item = {
+    title = title,
+    menu = menu,
+    x = 0,
+    y = 0,
+    height = 16,
+  };
+  if( this.menus[1] ) {
+    menu_item.x = this.menus[#this.menus].x + this.menus[#this.menus].width;
+  }
+  menu_item.width = this.white_font->sizeOf(title) + 32;
+  this.menus[#this.menus + 1] = menu_item;
+}
+
+function UIMenuBar::draw(canvas) {
+  if( ! this.visible ) {
+    return;
+  }
+  var panel_sprites = this.panel_sprites;
+  var panel_sprites_draw = panel_sprites.draw;
+  canvas->nonOverlapping();
+  panel_sprites_draw(panel_sprites, canvas, 1, 0,  0);
+  panel_sprites_draw(panel_sprites, canvas, 4, 0,  6);
+  panel_sprites_draw(panel_sprites, canvas, 7, 0, 10);
+  for( x = 10, this.width - 10, 10 ) {
+    panel_sprites_draw(panel_sprites, canvas, 2, x,  0);
+  }
+  for( x = 10, this.width - 10, 10 ) {
+    panel_sprites_draw(panel_sprites, canvas, 5, x,  6);
+  }
+  for( x = 10, this.width - 10, 10 ) {
+    panel_sprites_draw(panel_sprites, canvas, 8, x, 10);
+  }
+  canvas->nonOverlapping(false);
+  var x = this.width - 10;
+  panel_sprites_draw(panel_sprites, canvas, 3, x,  0);
+  panel_sprites_draw(panel_sprites, canvas, 6, x,  6);
+  panel_sprites_draw(panel_sprites, canvas, 9, x, 10);
+
+  for( _, menu in ipairs(this.menus) ) {
+    this.white_font->draw(canvas, menu.title, menu.x, menu.y, 0, menu.height);
+  }
+  for( _, menu in ipairs(this.open_menus) ) {
+    this->drawMenu(menu, canvas);
+  }
+
+  // Draw clock
+  if( this.ui.app.config.twentyfour_hour_clock ) {
+    this.white_font->draw(canvas, os.date("%H:%M"), this.width-45, 2,  0);
+  } else {
+    this.white_font->draw(canvas, os.date("%I:%M %p"), this.width-65, 2,  0);
+  }
+}
+
+function UIMenuBar::drawMenu(menu, canvas) {
+  var panel_sprites = this.panel_sprites;
+  var panel_sprites_draw = panel_sprites.draw;
+  var x, y, w, h = menu.x, menu.y, menu.width, menu.height;
+  canvas->nonOverlapping();
+  menu.render_list->draw(canvas, x, y);
+  canvas->nonOverlapping(false);
+  var btmy = y + h - 6;
+  panel_sprites_draw(panel_sprites, canvas, 3, x + w - 10, y);
+  for( ypos = y + 6, y + h - 6, 4 ) {
+    panel_sprites_draw(panel_sprites, canvas, 6, x + w - 10, ypos);
+  }
+  panel_sprites_draw(panel_sprites, canvas, 9, x + w - 10, btmy);
+
+  x = menu.x;
+  y = menu.y + 4;
+  for( i, item in ipairs(menu.items) ) {
+    // Update the checkbox status if necessary before drawing
+    if( item.is_check_item && item.condition ) {
+      item.checked = item.condition();
+    }
+
+    var font = this.white_font;
+    if( i == menu.hover_index ) {
+      font = this.blue_font;
+    }
+    font->draw(canvas, item.title, x, y);
+    if( item.submenu ) {
+      font->draw(canvas, "+", x + w - 10, y);
+    } else if( item.checked ) {
+      panel_sprites_draw(panel_sprites, canvas, 10, x, y);
+    }
+    y +=   14;
+  }
+}
+
+function UIMenuBar::hitTestBar(x, y) {
+  if( y < 16 ) {
+    for( _, menu in ipairs(this.menus) ) {
+      if( menu.x <= x && x < menu.x + menu.width ) {
+        var submenu = menu.menu;
+        submenu.x = menu.x;
+        submenu.y = menu.y + menu.height - 2;
+        submenu.hover_index = 0;
+        this->calculateMenuSize(submenu);
+        return submenu;
+      }
+    }
+  }
+  return false;
+}
+
+function UIMenuBar::onMouseMove(x, y) {
+  var padding = 6;
+  var visible = y < this.height + padding;
+  var newactive = false;
+  if( ! this.active_menu ) {
+    for( i = #this.open_menus, 1, -1 ) {
+      if( this.open_menus[i]->hitTest(x, y, padding) ) {
+        this.active_menu = this.open_menus[i];
+        newactive = true;
+        break;
+      }
+    }
+  }
+  if( this.active_menu ) {
+    var menu = this.active_menu;
+    while( true ) {
+      var hit = menu->hitTest(x, y, padding);
+      var toparent = true;
+      if( hit ) {
+        toparent = false;
+        visible = true;
+        if( hit != true ) {
+          menu.hover_index = hit;
+        } else {
+          menu.hover_index = 0;
+          if( menu.parent && menu.parent->hitTest(x, y, 0) ) {
+            toparent = true;
+          }
+        }
+        var child = menu.items[menu.hover_index];
+        child = ! toparent && child && child.submenu;
+        if( child ) {
+          child.x = menu.x + menu.width - 10;
+          child.y = menu.y + menu.hover_index * 14 - 14;
+          this->calculateMenuSize(child);
+          this.open_menus[child.level] = child;
+          for( i = #this.open_menus, child.level + 1, -1 ) {
+            this.open_menus[i] = null;
+          }
+          if( child->hitTest(x, y, 0) ) {
+            menu.hover_index = 0;
+            this.active_menu = child;
+            child.parent = menu;
+            menu = child;
+            newactive = true;
+          } else {
+            break;
+          }
+        } else if( ! toparent ) {
+          break;
+        }
+      }
+      if( toparent ) {
+        newactive = true;
+        menu.hover_index = 0;
+        menu = menu.parent;
+        if( ! menu ) {
+          var bar_menu = this->hitTestBar(x, y);
+          if( bar_menu ) {
+            this.open_menus = {bar_menu};
+          }
+          this.active_menu = bar_menu || (visible && this.active_menu);
+          break;
+        }
+        this.active_menu = menu;
+      }
+    }
+  } else if( this.ui.down_count != 0 ) {
+    var bar_menu = this->hitTestBar(x, y);
+    if( bar_menu ) {
+      this.open_menus = {bar_menu};
+      this.active_menu = bar_menu;
+    }
+  }
+  newactive = newactive || (visible && ! this.visible);
+  if( visible ) {
+    this->appear();
+  } else {
+    this->disappear();
+  }
+  return newactive;
+}
+
+function UIMenuBar::appear() {
+  this.disappear_counter = null;
+  this.visible = true;
+  if( ! this.on_top ) {
+    this.ui->sendToTop(this);
+    this.on_top = true;
+  }
+}
+
+function UIMenuBar::disappear() {
+  if( ! this.disappear_counter ) {
+    this.disappear_counter = 100;
+  }
+}
+
+function UIMenuBar::onMouseDown(button, x, y) {
+  if( button != "left" || ! this.visible ) {
+    return;
+  }
+  var repaint = false;
+  while( this.active_menu ) {
+    var menu = this.active_menu;
+    if( menu->hitTest(x, y, 0) ) {
+      if( repaint ) {
+        this->onMouseMove(x, y);
+      }
+      return true;
+    }
+    for( i = #this.open_menus, this.active_menu.level, -1 ) {
+      this.open_menus[i] = null;
+    }
+    this.active_menu = menu.parent;
+    repaint = true;
+  }
+  var new_active = this->hitTestBar(x, y);
+  if( new_active != this.active_menu ) {
+    this.open_menus = {new_active};
+    this.active_menu = new_active;
+    repaint = true;
+    this.ui->playSound("selectx.wav");
+  }
+  return repaint;
+}
+
+function UIMenuBar::onMouseUp(button, x, y) {
+  if( button != "left" || ! this.visible ) {
+    return;
+  }
+  var repaint = false;
+  while( this.active_menu ) {
+    var index = this.active_menu->hitTest(x, y, 0);
+    if( index == false ) {
+      if( ! this.active_menu.parent && y < 16 ) {
+        break;
+      } else {
+        this.active_menu = this.active_menu.parent;
+      }
+    } else if( index == true ) {
+      break;
+    } else {
+      var item = this.active_menu.items[index];
+      if( item.submenu ) {
+        break;
+      } else if( item.is_check_item ) {
+        if( item.group ) {
+          if( ! item.checked ) {
+            item.checked = true;
+            for( _, itm in ipairs(this.active_menu.items) ) {
+              if( itm != item && itm.group == item.group ) {
+                itm.checked = false;
+              }
+            }
+            if( item.handler ) {
+              item.handler(item, this.active_menu);
+            }
+          }
+        } else {
+          item.checked = ! item.checked;
+          if( item.handler ) {
+            item.handler(item, this.active_menu);
+          }
+        }
+      } else {
+        if( item.handler ) {
+          item.handler(item, this.active_menu);
+        }
+        if( y > 22 ) {
+          this->disappear();
+        }
+        this.active_menu = false;
+      }
+      this.ui->playSound("selectx.wav");
+      repaint = true;
+      break;
+    }
+  }
+  for( i = #this.open_menus, (this.active_menu && this.active_menu.level || 0) + 1, -1 ) {
+    this.open_menus[i] = null;
+  }
+  return repaint;
+}
+
+function UIMenuBar::calculateMenuSize(menu) {
+  if( menu.has_size != this ) {
+    var w = 20;
+    var h = 6;
+    for( _, item in ipairs(menu.items) ) {
+      var item_w = this.white_font->sizeOf(item.title) + 10;
+      if( item_w > w ) {
+        w = item_w;
+      }
+      h +=   14;
+    }
+    if( h < 20 ) {
+      h = 20;
+    }
+    menu.width = w;
+    menu.height = h;
+    menu.has_size = this;
+    var render_list = TH.spriteList();
+    menu.render_list = render_list;
+    render_list->setSheet(this.panel_sprites);
+
+    render_list->append(1, 0, 0);
+    for( x = 10, w - 10, 10 ) {
+      render_list->append(2, x, 0);
+    }
+    for( y = 6, h - 6, 4 ) {
+      render_list->append(4, 0, y);
+      for( x = 10, w - 10, 10 ) {
+        render_list->append(5, x, y);
+      }
+    }
+    var btmy = h - 6;
+    render_list->append(7, 0, btmy);
+    for( x = 10, w - 10, 10 ) {
+      render_list->append(8, x, btmy);
+    }
+
+  }
+}
+
+class ("UIMenu");
+
+//-@type UIMenu
+var UIMenu = _G["UIMenu"];
+
+function UIMenu::UIMenu() {
+  this.items = {};
+  this.parent = false;
+  this.hover_index = 0;
+  this.has_size = false;
+}
+
+function UIMenu::hitTest(x, y, padding) {
+  // number -> hit that item
+  // true   -> hit menu, but not an item
+  // false  -> no hit
+  if( this.x - padding <= x && x < this.x + this.width + padding &&
+      this.y - padding <= y && y < this.y + this.height + padding ) {
+    if( this.x <= x && x < this.x + this.width ) {
+      var index = math_floor((y - this.y + 12) / 14);
+      if( 1 <= index && index <= #this.items ) {
+        return index;
+      }
+    }
+    return true;
+  } else {
+    return false;
+  }
+}
+
+function UIMenu::appendBase(item) {
+  this.items[#this.items + 1] = item;
+  this.has_size = false;
+  return this;
+}
+
+function UIMenu::appendItem(text, callback) {
+  return this->appendBase ({
+    title = text,
+    handler = callback,
+  });
+}
+
+function UIMenu::appendCheckItem(text, checked, callback, group, condition) {
+  return this->appendBase ({
+    is_check_item = true,
+    title = text,
+    checked = ! ! checked,
+    handler = callback,
+    group = group,
+    condition = condition
+  });
+}
+
+function UIMenu::appendMenu(text, menu) {
+  menu.parent = this;
+  return this->appendBase ({
+    title = text,
+    submenu = assert(menu, "No submenu"),
+  });
+}
+
+//! Make a menu for the map editor.
+//!param app Application.
+function UIMenuBar::makeMapeditorMenu(app) {
+  var menu = UIMenu();
+  menu->appendItem(_S.menu_file.load, function() { this.ui->addWindow(UILoadMap(this.ui, "map")); })
+    ->appendItem(_S.menu_file.save, function() { this.ui->addWindow(UISaveMap(this.ui)); })
+    ->appendItem(_S.menu_file.quit, function() { this.ui->quit(); });
+  this->addMenu(_S.menu.file, menu);
+
+  menu = UIMenu();
+  menu->appendItem(_S.menu_player_count.players_1, function() { this.ui.map_editor->setPlayerCount(1); })
+    ->appendItem(_S.menu_player_count.players_2, function() { this.ui.map_editor->setPlayerCount(2); })
+    ->appendItem(_S.menu_player_count.players_3, function() { this.ui.map_editor->setPlayerCount(3); })
+    ->appendItem(_S.menu_player_count.players_4, function() { this.ui.map_editor->setPlayerCount(4); });
+  this->addMenu(_S.menu.player_count, menu);
+}
+
+//! Make a menu for the game.
+//!param app Application.
+function UIMenuBar::makeGameMenu(app) {
+  var menu = UIMenu();
+  menu->appendItem(_S.menu_file.load, function() { this.ui->addWindow(UILoadGame(this.ui, "game")); })
+    ->appendItem(_S.menu_file.save, function() { this.ui->addWindow(UISaveGame(this.ui)); })
+    ->appendItem(_S.menu_file.restart, function() { app->restart(); })
+    ->appendItem(_S.menu_file.quit, function() { this.ui->quit(); });
+  this->addMenu(_S.menu.file, menu);
+
+  var options = UIMenu();
+  if( app.audio.has_bg_music ) {
+    var function vol(level, setting) {
+      if( setting == "music" ) {
+        return level == app.config.music_volume,
+          function() {
+            app.audio->setBackgroundVolume(level);
+            app->saveConfig();
+          },
+          "";
+      } else if( setting == "sound" ) {
+        return level == app.config.sound_volume,
+          function() {
+            app.audio->setSoundVolume(level);
+            app->saveConfig();
+          },
+          "";
+      } else {
+        return level == app.config.announcement_volume,
+          function() {
+            app.audio->setAnnouncementVolume(level);
+            app->saveConfig();
+          },
+          "";
+      }
+    }
+
+    var function appendVolume(setting) {
+      var volume_menu = UIMenu(); // The three Volume menus
+      for( level = 10, 100, 10 ) {
+        volume_menu->appendCheckItem(_S.menu_options_volume[level], vol(level / 100, setting));
+      }
+      return volume_menu;
+    }
+
+  options->appendCheckItem(_S.menu_options.sound,
+    app.config.play_sounds,
+    function(item) {
+      app.audio->playSoundEffects(item.checked);
+      app->saveConfig();
+    },
+    null,
+    function() {
+      return app.config.play_sounds;
+    });
+
+
+  options->appendCheckItem(_S.menu_options.announcements,
+    app.config.play_announcements,
+    function(item) {
+      app.config.play_announcements = item.checked;
+      app->saveConfig();
+    },
+    null,
+    function() {
+      return app.config.play_announcements;
+    });
+
+ options->appendCheckItem(_S.menu_options.music,
+    app.config.play_music,
+    function(item) {
+      app.config.play_music = item.checked;
+      this.ui->togglePlayMusic(item);
+      app->saveConfig();
+    },
+    null,
+    function(musicStatus) {
+      return app.config.play_music;
+    });
+
+  options
+    ->appendMenu(_S.menu_options.sound_vol,         appendVolume("sound"))
+    ->appendMenu(_S.menu_options.announcements_vol, appendVolume("announcement"))
+    ->appendMenu(_S.menu_options.music_vol,         appendVolume("music"))
+    ->appendItem(_S.menu_options.jukebox, function() { this.ui->addWindow(UIJukebox(app)); });
+  }
+
+  var function boolean_runtime_config(option) {
+    return ! ! app.runtime_config[option], function(item) {
+      app.runtime_config[option] = item.checked;
+    };
+  }
+  options->appendCheckItem(_S.menu_options.lock_windows, boolean_runtime_config("lock_windows"));
+
+  // Edge Scrolling
+  options->appendCheckItem(_S.menu_options.edge_scrolling,
+    ! app.config.prevent_edge_scrolling,
+    function(item) { app.config.prevent_edge_scrolling = ! item.checked; },
+    null,
+    function() { return ! app.config.prevent_edge_scrolling; });
+
+  // Mouse Capture
+  options->appendCheckItem(_S.menu_options.capture_mouse,
+    app.config.capture_mouse,
+    function(item) { app.config.capture_mouse = item.checked;
+      app->saveConfig();
+      app->setCaptureMouse();
+    });
+
+  options->appendCheckItem(_S.menu_options.adviser_disabled,
+    ! app.config.adviser_disabled,
+    function(item) {
+      app.config.adviser_disabled = ! item.checked;
+      app->saveConfig();
+    },
+    null,
+    function() {
+      return ! app.config.adviser_disabled;
+    });
+
+  options->appendCheckItem(_S.menu_options.twentyfour_hour_clock,
+    app.config.twentyfour_hour_clock,
+    function(item) {
+      app.config.twentyfour_hour_clock = item.checked;
+      app->saveConfig();
+    });
+
+  var function temperatureDisplay(method) {
+    return method == 1, function() {
+      app.world.map->setTemperatureDisplayMethod(method);
+    }, "", function () {
+      return app.world.map.temperature_display_method == method;
+    };
+  }
+
+  var function wageIncreaseRequests(grant) {
+    return grant, function() {
+      app.world->getLocalPlayerHospital().policies.grant_wage_increase = grant;
+    }, "", function () {
+      if( app.world->getLocalPlayerHospital().policies.grant_wage_increase == null ) {
+        app.world->getLocalPlayerHospital().policies.grant_wage_increase = app.config.grant_wage_increase;
+      }
+      return app.world->getLocalPlayerHospital().policies.grant_wage_increase == grant;
+    };
+  }
+
+  options->appendMenu(_S.menu_options.wage_increase, UIMenu()
+    ->appendCheckItem(_S.menu_options_wage_increase.grant, wageIncreaseRequests(true))
+    ->appendCheckItem(_S.menu_options_wage_increase.deny, wageIncreaseRequests(false))
+  );
+
+  options->appendMenu(_S.menu_options.warmth_colors, UIMenu()
+    ->appendCheckItem(_S.menu_options_warmth_colors.choice_1, temperatureDisplay(1))
+    ->appendCheckItem(_S.menu_options_warmth_colors.choice_2, temperatureDisplay(2))
+    ->appendCheckItem(_S.menu_options_warmth_colors.choice_3, temperatureDisplay(3))
+  );
+
+  var function rate(speed) {
+    return speed == "Normal", function() {
+      app.world->setSpeed(speed);
+    }, "", function() {
+      return app.world->isCurrentSpeed(speed);
+    };
+  }
+
+  options->appendMenu(_S.menu_options.game_speed, UIMenu()
+    ->appendCheckItem(_S.menu_options_game_speed.pause,              rate("Pause"))
+    ->appendCheckItem(_S.menu_options_game_speed.slowest,            rate("Slowest"))
+    ->appendCheckItem(_S.menu_options_game_speed.slower,             rate("Slower"))
+    ->appendCheckItem(_S.menu_options_game_speed.normal,             rate("Normal")) // (default)
+    ->appendCheckItem(_S.menu_options_game_speed.max_speed,          rate("Max speed"))
+    ->appendCheckItem(_S.menu_options_game_speed.and_then_some_more, rate("And then some more"))
+  );
+  this->addMenu(_S.menu.options, options);
+  this->addMenu(_S.menu.charts, UIMenu()
+    ->appendItem(_S.menu_charts.bank_manager, function() { this.ui.bottom_panel->dialogBankManager(true); })
+    ->appendItem(_S.menu_charts.statement, function() { this.ui.bottom_panel->dialogBankStats(true); })
+    ->appendItem(_S.menu_charts.staff_listing, function() { this.ui.bottom_panel->dialogStaffManagement(true); })
+    ->appendItem(_S.menu_charts.town_map, function() { this.ui.bottom_panel->dialogTownMap(true); })
+    ->appendItem(_S.menu_charts.casebook, function() { this.ui.bottom_panel->dialogDrugCasebook(true); })
+    ->appendItem(_S.menu_charts.research, function() { this.ui.bottom_panel->dialogResearch(true); })
+    ->appendItem(_S.menu_charts.status, function() { this.ui.bottom_panel->dialogStatus(true); })
+    ->appendItem(_S.menu_charts.graphs, function() { this.ui.bottom_panel->dialogCharts(true); })
+    ->appendItem(_S.menu_charts.policy, function() { this.ui.bottom_panel->dialogPolicy(true); })
+    ->appendItem(_S.menu_charts.briefing, function() { this.ui->showBriefing(); })
+  );
+  var function _(s) { return "  " .. s->upper() .. "  "; }
+  var function limit_camera(item) {
+    app.ui->limitCamera(item.checked);
+  }
+  var function disable_salary_raise(item) {
+    app.world->debugDisableSalaryRaise(item.checked);
+  }
+  var function overlay(...) {
+    var args = {n = select('#', ...), ...};
+    return function(item, m) {
+      if( args.n > 0 ) {
+        app.map->loadDebugText(unpack(args, 1, args.n));
+      } else {
+        app.map->clearDebugText();
+      }
+    };
+  }
+  var levels_menu = UIMenu();
+  for( L = 1, 12 ) {
+    levels_menu->appendItem(("  L%i  ")->format(L), function() {
+      var status, err = pcall(app.loadLevel, app, L);
+      if( ! status ) {
+        err = _S.errors.load_prefix .. err;
+        print(err);
+        this.ui->addWindow(UIInformation(this.ui, {err}));
+      }
+    });
+  }
+  if( this.ui.app.config.debug ) {
+    this->addMenu(_S.menu.debug, UIMenu() // Debug
+      ->appendMenu(_S.menu_debug.jump_to_level, levels_menu)
+      ->appendItem(_S.menu_debug.connect_debugger, function() { this.ui->connectDebugger(); })
+      ->appendCheckItem(_S.menu_debug.limit_camera,         true, limit_camera, null, function() { return this.ui.limit_to_visible_diamond; })
+      ->appendCheckItem(_S.menu_debug.disable_salary_raise, false, disable_salary_raise, null, function() { return this.ui.app.world.debug_disable_salary_raise; })
+      ->appendItem(_S.menu_debug.make_debug_fax,     function() { this.ui->makeDebugFax(); })
+      ->appendItem(_S.menu_debug.make_debug_patient, function() { this.ui->addWindow(UIMakeDebugPatient(this.ui)); })
+      ->appendItem(_S.menu_debug.cheats,             function() { this.ui->addWindow(UICheats(this.ui)); })
+      ->appendItem(_S.menu_debug.lua_console,        function() { this.ui->addWindow(UILuaConsole(this.ui)); })
+      ->appendItem(_S.menu_debug.debug_script,       function() { this.ui->runDebugScript(); })
+      ->appendItem(_S.menu_debug.calls_dispatcher,   function() { this.ui->addWindow(UICallsDispatcher(this.ui)); })
+      ->appendItem(_S.menu_debug.dump_strings,       function() { this.ui.app->dumpStrings(); })
+      ->appendItem(_S.menu_debug.dump_gamelog,       function() { this.ui.app.world->dumpGameLog(); })
+      ->appendMenu(_S.menu_debug.map_overlay,        UIMenu()
+        ->appendCheckItem(_S.menu_debug_overlay.none,         true, overlay(), "")
+        ->appendCheckItem(_S.menu_debug_overlay.flags,       false, overlay("flags"), "")
+        ->appendCheckItem(_S.menu_debug_overlay.positions,   false, overlay("positions"), "")
+        ->appendCheckItem(_S.menu_debug_overlay.heat,        false, overlay("heat"), "")
+        ->appendCheckItem(_S.menu_debug_overlay.byte_0_1,    false, overlay(35, 8, 0, 1, false), "")
+        ->appendCheckItem(_S.menu_debug_overlay.byte_floor,  false, overlay(35, 8, 2, 2, false), "")
+        ->appendCheckItem(_S.menu_debug_overlay.byte_n_wall, false, overlay(35, 8, 3, 3, false), "")
+        ->appendCheckItem(_S.menu_debug_overlay.byte_w_wall, false, overlay(35, 8, 4, 4, false), "")
+        ->appendCheckItem(_S.menu_debug_overlay.byte_5,      false, overlay(35, 8, 5, 5, true), "")
+        ->appendCheckItem(_S.menu_debug_overlay.byte_6,      false, overlay(35, 8, 6, 6, true), "")
+        ->appendCheckItem(_S.menu_debug_overlay.byte_7,      false, overlay(35, 8, 7, 7, true), "")
+        ->appendCheckItem(_S.menu_debug_overlay.parcel,      false, overlay("parcel"), "")
+      )
+      ->appendItem(_S.menu_debug.sprite_viewer, function() { corsixth.require("sprite_viewer"); })
+    );
+  }
+}

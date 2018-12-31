@@ -1,0 +1,319 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var object = {};
+object.id = "plant";
+object.thob = 45;
+object.name = _S.object.plant;
+object.class = "Plant";
+object.tooltip = _S.tooltip.objects.plant;
+object.ticks = false;
+object.corridor_object = 7;
+object.build_preview_animation = 934;
+
+object.idle_animations = {
+  north = 1950,
+  south = 1950,
+  east = 1950,
+  west = 1950,
+};
+object.usage_animations = {
+  north = {
+    begin_use = { ["Handyman"] = {1972, object_visible = true} },
+    in_use = { ["Handyman"] = {1980, object_visible = true} },
+  },
+  east = {
+    begin_use = { ["Handyman"] = {1974, object_visible = true} },
+    in_use = { ["Handyman"] = {1982, object_visible = true} },
+  },
+};
+object.orientations = {
+  north = {
+    footprint = { {0, 0, complete_cell = true} },
+    use_position = {0, -1},
+    use_animate_from_use_position = true
+  },
+  east = {
+    footprint = { {0, 0, complete_cell = true} },
+    use_position = {-1, 0},
+    use_animate_from_use_position = true
+  },
+  south = {
+    footprint = { {0, 0, complete_cell = true} },
+    use_position = {0, -1},
+    use_animate_from_use_position = true
+  },
+  west = {
+    footprint = { {0, 0, complete_cell = true} },
+    use_position = {-1, 0},
+    use_animate_from_use_position = true
+  },
+};
+
+// For litter: put broom back 356
+// take broom out: 1874
+// swoop: 1878
+// Frames for plant states are
+// * healthy: 1950
+// * drooping1: 1951
+// * drooping2: 1952
+// * dying: 1953
+// * dead: 1954
+
+
+var days_between_states = 75;
+
+// days before we reannouncing our watering status if we were unreachable
+var days_unreachable = 10;
+
+//! An `Object` which needs watering now and then.
+class ("Plant") (Object);
+
+//-@type Plant
+var Plant = _G["Plant"];
+
+function Plant::Plant(world, object_type, x, y, direction, etc) {
+  // It doesn't matter which direction the plant is facing. It will be rotated so that an approaching
+  // handyman uses the correct usage animation when appropriate.
+  this->Object(world, object_type, x, y, direction, etc);
+  this.current_state = 0;
+  this.base_frame = this.th->getFrame();
+  this.days_left = days_between_states;
+  this.unreachable = false;
+  this.unreachable_counter = days_unreachable;
+}
+
+//! Goes one step forward (or backward) in the states of the plant.
+//!param restoring (boolean) If true the plant improves its health instead of drooping.
+function Plant::setNextState(restoring) {
+  if( restoring ) {
+    if( this.current_state > 0 ) {
+      this.current_state = this.current_state - 1;
+    }
+  } else if( this.current_state < 5 ) {
+    this.current_state = this.current_state + 1;
+  }
+
+  this.th->setFrame(this.base_frame + this.current_state);
+}
+
+var plant_restoring; plant_restoring = permanent("plant_restoring")( function(plant) {
+  var phase = plant.phase;
+  plant->setNextState(true);
+  if( phase > 0 ) {
+    plant.phase = phase - 1;
+    plant->setTimer(math.floor(14 / plant.cycles), plant_restoring);
+  } else {
+    plant.ticks = false;
+  }
+});
+
+//! Restores the plant to its initial state. (i.e. healthy)
+function Plant::restoreToFullHealth() {
+  this.ticks = true;
+  this.phase = this.current_state;
+  this.cycles = this.current_state;
+  this->setTimer((this.direction == "south" || this.direction == "east") && 35 || 20, plant_restoring);
+  this.days_left = days_between_states;
+
+  var taskIndex = this.hospital->getIndexOfTask(this.tile_x, this.tile_y, "watering");
+  if( taskIndex != -1 ) {
+  this.hospital->removeHandymanTask(taskIndex, "watering");
+  }
+}
+
+//! Overridden since the plant animates slowly over time
+function Plant::tick() {
+  var timer = this.timer_time;
+  if( timer ) {
+    --timer    ;
+    if( timer == 0 ) {
+      this.timer_time = null;
+      var timer_function = this.timer_function;
+      this.timer_function = null;
+      timer_function(this);
+    } else {
+      this.timer_time = timer;
+    }
+  }
+}
+
+//! Returns whether the plant is in need of watering right now.
+function Plant::needsWatering() {
+  if( this.current_state == 0 ) {
+    if( this.days_left < 10 ) {
+      return true;
+    }
+  } else {
+    return true;
+  }
+}
+
+//! When the plant needs water it periodically calls for a nearby handyman.
+function Plant::callForWatering() {
+  // If self.ticks is true it means that a handyman is currently watering the plant.
+  // If there are no tiles to water from, just die.
+  if( ! this.ticks ) {
+    if( ! this.unreachable ) {
+      var index = this.hospital->getIndexOfTask(this.tile_x, this.tile_y, "watering");
+      if( index == -1 ) {
+        var call = this.world.dispatcher->callForWatering(this);
+        this.hospital->addHandymanTask(this, "watering", this.current_state + 1, this.tile_x, this.tile_y, call);
+      } else {
+        this.hospital->modifyHandymanTaskPriority(index, this.current_state + 1, "watering");
+      }
+    }
+
+    // If very thirsty, make user aware of it.
+    if( this.current_state > 1 && ! this.plant_announced ) {
+      this.world.ui.adviser->say(_A.warnings.plants_thirsty);
+      this.plant_announced = true;
+    }
+  }
+}
+
+//! When a handyman is about to be summoned this function queues the complete set of actions necessary,
+//  including entering and leaving any room involved. It also queues a meander action at the end.
+//  Note that if there are more plants that need watering inside the room he will continue to water
+//  those too before leaving.
+//!param handyman (Staff) The handyman that is about to get the actions.
+function Plant::createHandymanActions(handyman) {
+  var this_room = this->getRoom();
+  var handyman_room = handyman->getRoom();
+  var ux, uy = this->getBestUsageTileXY(handyman.tile_x, handyman.tile_y);
+  if( ! ux || ! uy ) {
+    // The plant cannot be reached.
+    this.unreachable = true;
+    this.unreachable_counter = days_unreachable;
+    var index = this.hospital->getIndexOfTask(this.tile_x, this.tile_y, "watering");
+    if( index != -1 ) {
+      this.hospital->removeHandymanTask(index, "watering");
+    }
+    // Release Handyman
+    handyman->setCallCompleted();
+    if( handyman_room ) {
+      handyman->setNextAction(handyman_room->createLeaveAction());
+      handyman->queueAction(MeanderAction());
+    } else {
+      handyman->setNextAction(MeanderAction());
+    }
+    return;
+  }
+  this.reserved_for = handyman;
+  var walk_action = WalkAction(ux, uy)->setIsEntering(this_room && true || false);
+  if( handyman_room && handyman_room != this_room ) {
+    handyman->setNextAction(handyman_room->createLeaveAction());
+    handyman->queueAction(walk_action);
+  } else {
+    handyman->setNextAction(walk_action);
+  }
+  handyman->queueAction(UseObjectAction(this)->enableWateringPlant());
+  CallsDispatcher.queueCallCheckpointAction(handyman);
+  handyman->queueAction(AnswerCallAction());
+}
+
+//! When a handyman should go to the plant he should approach it from the closest reachable tile.
+//!param from_x (integer) The x coordinate of tile to calculate from.
+//!param from_y (integer) The y coordinate of tile to calculate from.
+function Plant::getBestUsageTileXY(from_x, from_y) {
+  var access_points = {{dx =  0, dy =  1, direction = "north"},
+                         {dx =  0, dy = -1, direction = "south"},
+                         {dx = -1, dy =  0, direction = "east"},
+                         {dx =  1, dy =  0, direction = "west"}};
+  var shortest;
+  var best_point = null;
+  var room_here = this->getRoom();
+  for( _, point in ipairs(access_points) ) {
+    var dest_x, dest_y = this.tile_x + point.dx, this.tile_y + point.dy;
+    var room_there = this.world->getRoom(dest_x, dest_y);
+    if( room_here == room_there ) {
+      var distance = this.world->getPathDistance(from_x, from_y, this.tile_x + point.dx, this.tile_y + point.dy);
+      if( distance && (! best_point || shortest > distance) ) {
+        best_point = point;
+        shortest = distance;
+      }
+    }
+  }
+
+  if( best_point ) {
+    this.direction = best_point.direction;
+    return this.tile_x + best_point.dx, this.tile_y + best_point.dy;
+  } else {
+    this.direction = "north";
+    return;
+  }
+}
+
+//! Counts down to eventually let the plant droop.
+function Plant::tickDay() {
+  if( ! this.picked_up ) {
+    // The plant will need water a little more often if it is hot where it is.
+    var temp = this.world.map.th->getCellTemperature(this.tile_x, this.tile_y);
+    this.days_left = this.days_left - (1 + temp);
+    if( this.days_left < 1 ) {
+      this.days_left = days_between_states;
+      this->setNextState();
+    } else if( ! this.reserved_for && this->needsWatering() && ! this.unreachable ) {
+      this->callForWatering();
+    }
+    if( this.unreachable ) {
+      this.unreachable_counter = this.unreachable_counter - 1;
+      if( this.unreachable_counter == 0 ) {
+        this.unreachable = false;
+      }
+    }
+  }
+}
+
+//! The plant needs to retain its animation and reset its unreachable flag when being moved
+function Plant::onClick(ui, button) {
+  if( button == "right" ) {
+    this.unreachable = false;
+    this.picked_up = true;
+    this.current_frame = this.base_frame + this.current_state;
+  }
+  Object.onClick(this, ui, button);
+}
+
+function Plant::isPleasing() {
+  if( ! this.ticks ) {
+    return true;
+  } else {
+   return false;
+  }
+}
+
+function Plant::onDestroy() {
+  var index = this.hospital->getIndexOfTask(this.tile_x, this.tile_y, "watering");
+  if( index != -1 ) {
+    this.hospital->removeHandymanTask(index, "watering");
+  }
+  Object.onDestroy(this);
+}
+
+function Plant::afterLoad(old, new) {
+  if( old < 52 ) {
+    this.hospital = this.world->getLocalPlayerHospital();
+  }
+  Object.afterLoad(this, old, new);
+}
+
+
+return object;

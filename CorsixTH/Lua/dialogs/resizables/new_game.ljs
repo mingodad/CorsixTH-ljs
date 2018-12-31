@@ -1,0 +1,215 @@
+/* Copyright (c) 2010 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Class for the difficulty choice window.
+class ("UINewGame") (UIResizable);
+
+//-@type UINewGame
+var UINewGame = _G["UINewGame"];
+
+var col_bg = {
+  red = 154,
+  green = 146,
+  blue = 198,
+};
+
+var col_caption = {
+  red = 174,
+  green = 166,
+  blue = 218,
+};
+
+var col_textbox = {
+  red = 0,
+  green = 0,
+  blue = 0,
+};
+
+var col_highlight = {
+  red = 174,
+  green = 166,
+  blue = 218,
+};
+
+var col_shadow = {
+  red = 134,
+  green = 126,
+  blue = 178,
+};
+
+function UINewGame::UINewGame(ui) {
+  this->UIResizable(ui, 320, 220, col_bg);
+
+  var app = ui.app;
+  this.esc_closes = true;
+  this.resizable = false;
+  this.modal_class = "main menu";
+  this.on_top = true;
+  this->setDefaultPosition(0.5, 0.25);
+
+  if( TheApp.using_demo_files ) {
+    // We're using the demo version of TH. Load directly and activate the tutorial.
+    // Those who use the demo files probably want that anyway.
+    this.start_tutorial = true;
+    this->startGame("full");
+    this->close();
+    return;
+  }
+
+  this.border_sprites = app.gfx->loadSpriteTable("Bitmap", "aux_ui", true);
+  this.start_tutorial = false;
+  this.difficulty = 1;
+
+
+  var avail_diff = {
+    {text = _S.new_game_window.medium, tooltip = _S.tooltip.new_game_window.medium, param = "full"},
+  };
+  if( TheApp.fs->getFilePath("Levels", "Easy01.SAM") ) {
+    table.insert(avail_diff, 1, {text = _S.new_game_window.easy, tooltip = _S.tooltip.new_game_window.easy, param = "easy"});
+    this.difficulty = 2;
+  }
+  if( TheApp.fs->getFilePath("Levels", "Hard01.SAM") ) {
+    avail_diff[#avail_diff + 1] = {text = _S.new_game_window.hard, tooltip = _S.tooltip.new_game_window.hard, param = "hard"};
+  }
+  this.available_difficulties = avail_diff;
+
+  this.default_button_sound = "selectx.wav";
+  // Window parts definition
+  // Title
+  this->addBevelPanel(80, 10, 160, 20, col_caption)->setLabel(_S.new_game_window.caption).lowered = true;
+
+  // Player Name
+  this.player_name = app.config.player_name || os.getenv("USER") || os.getenv("USERNAME") || "PLAYER";
+  this->addBevelPanel(20, 45, 140, 30, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.new_game_window.player_name).lowered = true;
+  this.name_textbox = this->addBevelPanel(165, 45, 140, 30, col_textbox, col_highlight, col_shadow)
+    ->setTooltip(_S.tooltip.new_game_window.player_name)->setAutoClip(true)
+    ->makeTextbox(
+    /*persistable:new_game_confirm_name*/function() {
+      var name = this.name_textbox.text;
+      if( ! name->find("%S") ) {
+        this.name_textbox->setText(this.player_name);
+      } else {
+        this.player_name = name;
+        this->saveToConfig();
+      }
+    },
+    /*persistable:new_game_abort_name*/function() { this.name_textbox->setText(this.player_name); })
+    ->allowedInput({"alpha", "numbers", "misc"})->characterLimit(15)->setText(this.player_name);
+
+  // Tutorial
+  this->addBevelPanel(20, 80, 140, 30, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.new_game_window.tutorial).lowered = true;
+  this->addBevelPanel(165, 80, 140, 30, col_bg)->setLabel(_S.new_game_window.option_off)
+    ->makeToggleButton(0, 0, 135, 30, null, this.buttonTutorial)->setTooltip(_S.tooltip.new_game_window.tutorial);
+
+  // Difficulty
+  this->addBevelPanel(20, 115, 140, 30, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.new_game_window.difficulty).lowered = true;
+  this->addBevelPanel(165, 115, 140, 30, col_bg)->setLabel(this.available_difficulties[this.difficulty].text)
+    ->makeToggleButton(0, 0, 135, 30, null, this.dropdownDifficulty)->setTooltip(_S.tooltip.new_game_window.difficulty);
+
+  // Start and Cancel
+  this->addBevelPanel(20, 165, 140, 40, col_bg)->setLabel(_S.new_game_window.start)->makeButton(0, 0, 135, 40, null, this.buttonStart)->setTooltip(_S.tooltip.new_game_window.start);
+  this->addBevelPanel(165, 165, 140, 40, col_bg)->setLabel(_S.new_game_window.cancel)->makeButton(0, 0, 135, 40, null, this.buttonCancel)->setTooltip(_S.tooltip.new_game_window.cancel);
+}
+
+function UINewGame::saveToConfig() {
+  this.ui.app.config.player_name = this.player_name;
+  this.ui.app->saveConfig();
+}
+
+function UINewGame::onMouseDown(button, x, y) {
+  var repaint = UIResizable.onMouseDown(this, button, x, y);
+  if( button == "left" && ! repaint && ! (x >= 0 && y >= 0 &&
+  x < this.width && y < this.height) && this->hitTest(x, y) ) {
+    return this->beginDrag(x, y);
+  }
+  return repaint;
+}
+
+function UINewGame::hitTest(x, y) {
+  if( x >= 0 && y >= 0 && x < this.width && y < this.height ) {
+    return true;
+  }
+  var sprites = this.border_sprites;
+  if( ! sprites ) {
+    return false;
+  }
+  if( x < -9 || y < -9 || x >= this.width + 9 || y >= this.height + 9 ) {
+    return false;
+  }
+  if( (0 <= x && x < this.width) || (0 <= y && y < this.height) ) {
+    return true;
+  }
+  return sprites.hitTest(sprites, 10, x + 9,   y + 9) ||
+         sprites.hitTest(sprites, 12, x - 160, y + 9) ||
+         sprites.hitTest(sprites, 15, x + 9,   y - 240) ||
+         sprites.hitTest(sprites, 17, x - 160, y - 240);
+}
+
+function UINewGame::buttonTutorial(checked, button) {
+  this.start_tutorial = checked;
+  button.panel_for_sprite->setLabel(checked && _S.new_game_window.option_on || _S.new_game_window.option_off);
+}
+
+function UINewGame::dropdownDifficulty(activate, button) {
+  if( activate && #this.available_difficulties > 1 ) {
+    this.difficulty_dropdown = UIDropdown(this.ui, this, button, this.available_difficulties, this.selectDifficulty);
+    this->addWindow(this.difficulty_dropdown);
+  } else {
+    if( this.difficulty_dropdown ) {
+      this.difficulty_dropdown->close();
+      this.difficulty_dropdown = null;
+    }
+  }
+}
+
+function UINewGame::selectDifficulty(number) {
+  this.difficulty = number;
+}
+
+function UINewGame::buttonStart() {
+  this.name_textbox->confirm();
+  print("starting game with difficulty " .. this.available_difficulties[this.difficulty].param);
+  this->startGame(this.available_difficulties[this.difficulty].param);
+}
+
+function UINewGame::startGame(difficulty) {
+  this.ui.app->loadLevel(1, difficulty);
+  // Initiate campaign progression. The UI above may now have changed.
+  if( ! TheApp.using_demo_files ) {
+    TheApp.world.campaign_info = "TH.campaign";
+  }
+  if( this.start_tutorial ) {
+    TheApp.ui.start_tutorial = true;
+    TheApp.ui->startTutorial();
+  }
+}
+
+function UINewGame::buttonCancel() {
+  this.name_textbox->confirm();
+  this->close();
+}
+
+function UINewGame::close() {
+  UIResizable.close(this);
+  this.ui->addWindow(UIMainMenu(this.ui));
+}

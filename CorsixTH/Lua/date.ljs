@@ -1,0 +1,330 @@
+/* Copyright (c) 2018 Pavel "sofo" Schoffer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+/*
+  Date class is meant to encapsulate logic around months, years, days, hours.
+  It should be able to do adjustments with regards to days in given month and so on.
+
+  Date objects should be immutable and that is why date adjustments return new objects
+  instead of modifying the current one.
+*/
+
+class ("Date");
+
+//-@type Date
+var Date = _G["Date"];
+
+var month_length = {
+  31, // Jan
+  28, // Feb (29 in leap years, but TH doesn't have leap years)
+  31, // Mar
+  30, // Apr
+  31, // May
+  30, // Jun
+  31, // Jul
+  31, // Aug
+  30, // Sep
+  31, // Oct
+  30, // Nov
+  31, // Dec
+};
+
+var hours_per_day = 50;
+
+// STATIC
+
+/* Method returns the number of game hours in one day
+
+! This should be use everywhere we query this information
+
+!return (number) number of hours in a day.
+*/
+function Date.hoursPerDay() {
+  return hours_per_day;
+}
+
+// PUBLIC
+
+/* Date constructor
+
+! Date is initialized by setting year, month day and hour in this order
+the default day is 1-01-01T00 - if any of the components isn't set the
+default value is used.
+
+!param year (number) year of the new date
+!param month (number) month of the new date
+!param day (number) day of the new date
+!param hour (number) hour of the new date
+
+!return (Date) created object.
+*/
+function Date::Date(year, month, day, hour) {
+  this._year = year || 1;
+  this._month = month || 1;
+  this._day = day || 1;
+  this._hour = hour || 0;
+  this->_adjustOverflow();
+}
+
+/* Returns the last day of the current month
+
+! This method finds the correct last day for current month of self. This number
+is also the number of days within a month. Ignores leap years.
+
+!return (number)
+*/
+function Date::lastDayOfMonth() {
+  return month_length[this._month];
+}
+
+/* Adds months
+
+! Creates a copy of self with adjusted months.
+
+!param increment (number) number to adjust, can be negative
+
+!return (Date)
+*/
+function Date::plusMonths(increment) {
+  var new_month = this._month + increment;
+  return Date(this._year, new_month, this._day, this._hour);
+}
+
+/* Adds days
+
+! Creates a copy of self with adjusted days.
+
+!param increment (number) number to adjust, can be negative
+
+!return (Date)
+*/
+function Date::plusDays(increment) {
+  var new_day = this._day + increment;
+  return Date(this._year, this._month, new_day, this._hour);
+}
+
+/* Adds years
+
+! Creates a copy of self with adjusted years.
+
+!param increment (number) number to adjust, can be negative
+
+!return (Date)
+*/
+function Date::plusYears(increment) {
+  var new_year = this._year + increment;
+  return Date(new_year, this._month, this._day, this._hour);
+}
+
+/* Adds hours
+
+! Creates a copy of self with adjusted hours.
+
+!param increment (number) number to adjust, can be negative
+
+!return (Date)
+*/
+function Date::plusHours(increment) {
+  var new_hour = this._hour + increment;
+  return Date(this._year, this._month, this._day, new_hour);
+}
+
+/* Returns the month of year
+
+! Finds out what is a month of this year (1-12)
+
+!return (number)
+*/
+function Date::monthOfYear() {
+  return this._month;
+}
+
+/* Returns the day of month
+
+! Finds out what is a current day in a date (1-31)
+
+!return (number)
+*/
+function Date::dayOfMonth() {
+  return this._day;
+}
+
+/* Returns the year
+
+! Finds out what is a current year of this date (1-X)
+
+!return (number)
+*/
+function Date::year() {
+  return this._year;
+}
+
+/* Returns the hour of the day
+
+! Finds out what is an hour of this date starting on 0
+
+!return (number)
+*/
+function Date::hourOfDay() {
+  return this._hour;
+}
+
+/* Return string representation
+
+! Returns string representation of the date in format y-mm-ddThh
+
+!return (string)
+*/
+function Date::tostring() {
+  return string.format("%d-%02d-%02dT%02d", this._year, this._month, this._day, this._hour);
+}
+
+/* Checks if date is a last day of a month
+
+! Finds out if the current day is a last day in current month with respect to
+different month lengths.
+
+!return (boolean)
+*/
+function Date::isLastDayOfMonth() {
+  return this._day == this->lastDayOfMonth();
+}
+
+/* Checks if date is a last day of a year
+
+! Finds out if the current day is a last day in current month and current month
+is a last month in a year.
+
+!return (boolean)
+*/
+function Date::isLastDayOfYear() {
+  return this->isLastDayOfMonth() && this._month == 12;
+}
+
+/* Returns the month of the game
+
+! Returns the number of months started since the start of the game. This
+converts all the years to months and add them together with the started
+months.
+
+!return (number)
+*/
+function Date::monthOfGame() {
+  return (this._year - 1) * 12 + this._month;
+}
+
+/* Clone the date
+
+! Creates another instance of date with a same value
+
+!return (Date)
+*/
+function Date::clone() {
+  return Date(this._year, this._month, this._day, this._hour);
+}
+
+/* Checks the date
+
+! Checks the date with another passed as a parameter, but ignores time
+
+!param other (Date) The other day to be compared
+
+!return (boolean)
+*/
+function Date::isSameDay(other) {
+  return this._year == other._year && this._month == other._month && this._day == other._day;
+}
+
+// METAMETHODS
+
+var Date_mt = Date._metatable;
+
+function Date_mt.__eq(one, other) {
+  return one->isSameDay(other) && one._hour == other._hour;
+}
+
+function Date_mt.__lt(one, other) {
+  if( one._year == other._year ) {
+    if( one._month == other._month ) {
+      if( one._day == other._day ) {
+        return one._hour < other._hour;
+      }
+      return one._day < other._day;
+    }
+    return one._month < other._month;
+  }
+  return one._year < other._year;
+}
+
+// PRIVATE
+
+/* PRIVATE Adjusts the hours overflows
+
+! Method to deal with hour being more or less than valid value
+*/
+function Date::_adjustHoursOverflow() {
+  while( this._hour < 0 ) {
+    this._hour = this._hour + hours_per_day;
+    this._day = this._day - 1;
+  }
+  while( this._hour >= hours_per_day ) {
+    this._hour = this._hour - hours_per_day;
+    this._day = this._day + 1;
+  }
+  this->_adjustDayOverflow();
+}
+
+/* PRIVATE Adjusts the days overflows
+
+! Method to deal with day being more or less than valid value
+*/
+function Date::_adjustDayOverflow() {
+  while( this._day < 1 ) {
+    this._month = this._month - 1;
+    this->_adjustMonthOverflow();
+    this._day = this._day + this->lastDayOfMonth();
+  }
+  while( this._day > this->lastDayOfMonth() ) {
+    this._day = this._day - this->lastDayOfMonth();
+    this._month = this._month + 1;
+    this->_adjustMonthOverflow();
+  }
+}
+
+/* PRIVATE Adjusts the months overflows
+
+! Method to deal with month being more or less than valid value
+*/
+function Date::_adjustMonthOverflow() {
+  var monthIx = this._month - 1;
+  this._year = this._year + math.floor(monthIx / 12);
+  this._month = monthIx % 12 + 1;
+}
+
+/* PRIVATE Adjusts all the overflows
+
+! Normalize date to fix all the overflows of hours, days and months. This
+method is a key to date adjustments.
+*/
+function Date::_adjustOverflow() {
+  this->_adjustMonthOverflow();
+  this->_adjustDayOverflow();
+  this->_adjustHoursOverflow();
+}

@@ -1,0 +1,148 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var math_floor
+    = math.floor;
+var TH = require("TH");
+
+//! Invisible window which handles placing a `Staff` member in the world.
+class ("UIPlaceStaff") (Window);
+
+//-@type UIPlaceStaff
+var UIPlaceStaff = _G["UIPlaceStaff"];
+
+function UIPlaceStaff::UIPlaceStaff(ui, profile, x, y) {
+  this.ui = ui;
+  this.world = ui.app.world;
+  this.modal_class = "main";
+  this.esc_closes = true;
+  if( class.is(profile, Staff) ) {
+    this.staff = profile;
+    profile = profile.profile;
+  }
+  this.profile = profile;
+  // The receptionist has no door animations, and hence would not
+  // be able to leave a room if placed in one.
+  this.allow_in_rooms = profile.humanoid_class != "Receptionist";
+  this.anim = TH.animation();
+  this.anim->setLayer(5, profile.layer5);
+  var idle_anim = Humanoid.getIdleAnimation(profile.humanoid_class);
+  this.anim->setAnimation(this.world.anims, idle_anim);
+  var _, ghost = ui.app.gfx->loadPalette();
+  var grey_scale = this.world.anims.Alt32_GreyScale;
+  this.world.anims->setAnimationGhostPalette(idle_anim, ghost, grey_scale);
+  this->onCursorWorldPositionChange(x, y);
+  this->Window();
+}
+
+function UIPlaceStaff::close() {
+  if( this.staff ) {
+    this.staff.pickup = false;
+    this.staff.going_to_staffroom = null;
+    this.staff->getCurrentAction().window = null;
+    this.staff->setNextAction(MeanderAction());
+  } else if( this.profile ) {
+    this.ui->tutorialStep(2, {6, 7}, 1);
+    this.ui->tutorialStep(4, {4, 5}, 1);
+    // Return the profile to the available staff list
+    var staff_pool = this.world.available_staff[this.profile.humanoid_class];
+    staff_pool[#staff_pool + 1] = this.profile;
+  }
+  this.ui->playSound("plac_st2.wav");
+  Window.close(this);
+}
+
+function UIPlaceStaff::onCursorWorldPositionChange(x, y) {
+  x, y = this.ui->ScreenToWorld(x, y + 14);
+  this.tile_x = math_floor(x);
+  this.tile_y = math_floor(y);
+}
+
+var flag_cache = {};
+var flag_altpal = 16;
+function UIPlaceStaff::draw(canvas) {
+  if( this.world.user_actions_allowed ) {
+    this.world.map.th->getCellFlags(this.tile_x, this.tile_y, flag_cache);
+    var room = this.world->getRoom(this.tile_x, this.tile_y);
+    var player_id = this.ui.hospital->getPlayerIndex();
+    var valid = flag_cache.hospital && flag_cache.passable &&
+        (this.allow_in_rooms || flag_cache.roomId == 0) &&
+        (! room && true || ! room.crashed) &&
+        flag_cache.owner == player_id;
+    this.anim->setFlag(valid && 0 || flag_altpal);
+    var zoom = this.ui.zoom_factor;
+    if( canvas->scale(zoom) ) {
+      var x, y = this.ui->WorldToScreen(this.tile_x, this.tile_y);
+      this.anim->draw(canvas, math.floor(x / zoom), math.floor(y / zoom));
+      canvas->scale(1);
+    } else {
+      this.anim->draw(canvas, this.ui->WorldToScreen(this.tile_x, this.tile_y));
+    }
+    this.ui->tutorialStep(2, valid && 7 || 6, valid && 6 || 7);
+    this.ui->tutorialStep(4, valid && 5 || 4, valid && 4 || 5);
+  }
+}
+
+function UIPlaceStaff::onMouseUp(button, x, y) {
+  if( this.world.user_actions_allowed ) {
+    if( button == "right" ) {
+      this->close();
+      return true;
+    } else if( button == "left" ) {
+      this->onMouseMove(x, y);
+      this.world.map.th->getCellFlags(this.tile_x, this.tile_y, flag_cache);
+      var room = this.world->getRoom(this.tile_x, this.tile_y);
+      var player_id = this.ui.hospital->getPlayerIndex();
+      if( flag_cache.hospital && flag_cache.passable &&
+          (this.allow_in_rooms || flag_cache.roomId == 0) &&
+          (! room || ! room.crashed) &&
+          flag_cache.owner == player_id ) {
+        if( this.staff ) {
+          this.staff->setTile(this.tile_x, this.tile_y);
+        } else {
+          var entity = this.world->newEntity("Staff", 2);
+          entity->setProfile(this.profile);
+          this.profile = null;
+          entity->setTile(this.tile_x, this.tile_y);
+          this.ui.hospital->addStaff(entity);
+          entity->setHospital(this.ui.hospital);
+          var entity_room = entity->getRoom();
+          if( entity_room ) {
+            entity_room->onHumanoidEnter(entity);
+          } else {
+            entity->onPlaceInCorridor();
+          }
+          this.ui->tutorialStep(2, 6, "next");
+          this.ui->tutorialStep(4, 4, "next");
+          // Update the staff management window if it is open.
+          var window = this.world.ui->getWindow(UIStaffManagement);
+          if( window ) {
+            window->updateStaffList(this);
+          }
+        }
+        this->close();
+        return true;
+      } else {
+        this.ui.adviser->say(_A.placement_info.staff_cannot_place);
+        return true;
+      }
+    }
+  }
+}

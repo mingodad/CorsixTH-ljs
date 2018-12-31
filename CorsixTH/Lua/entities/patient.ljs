@@ -1,0 +1,1174 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! A `Humanoid` who is in the hospital for diagnosis and/or treatment.
+class ("Patient") (Humanoid);
+
+//-@type Patient
+var Patient = _G["Patient"];
+
+function Patient::Patient(...) {
+  this->Humanoid(...);
+  this.hover_cursor = TheApp.gfx->loadMainCursor("patient");
+  this.should_knock_on_doors = true;
+  this.treatment_history = {};
+  this.going_home = false; // If set, the patient is going home.
+  this.litter_countdown = null; // If set, number of tiles to walk before attempting to drop litter.
+  this.has_fallen = 1;
+  this.has_vomitted = 0;
+  this.action_string = "";
+  this.cured = false;
+  this.infected = false;
+  // To distinguish between actually being dead and having a nil hospital
+  this.dead = false;
+  // Is the patient reserved for a particular nurse when being vaccinated
+  this.reserved_for = false;
+  this.vaccinated = false;
+  // Has the patient been sent to the wrong room and needs redirecting
+  this.needs_redirecting = false;
+  this.attempted_to_infect= false;
+  // Is the patient about to be vaccinated?
+  this.vaccination_candidate = false;
+  // Has the patient passed reception?
+  this.has_passed_reception = false;
+
+  // Is the patient trying to get to the toilet? ("yes", "no", or "no-toilets")
+  this.going_to_toilet = "no";
+
+  // Health history in entries 1..SIZE (may not all exist at first). The "last"
+  // entry indicates last written entry, "(last+1) % SIZE" is the oldest entry.
+  // The "size" entry holds the length of the array (that is, SIZE).
+  // Variable gets automatically initialized on first day.
+  this.health_history = null;
+}
+
+function Patient::onClick(ui, button) {
+  if( button == "left" ) {
+    if( this.message_callback ) {
+      this->message_callback();
+    } else {
+      var hospital = this.hospital || this.world->getLocalPlayerHospital();
+      var epidemic = hospital && hospital.epidemic;
+      if( ! epidemic ||
+          (! epidemic.coverup_in_progress ||
+            (! this.infected || this.marked_for_vaccination) &&
+            ! epidemic.vaccination_mode_active) ) {
+        ui->addWindow(UIPatient(ui, this));
+      }
+      if( epidemic && epidemic.coverup_in_progress &&
+          this.infected && ! this.marked_for_vaccination &&
+          // Prevent further vaccinations when the timer ends
+          ! epidemic.timer.closed ) {
+        epidemic->markForVaccination(this);
+      }
+    }
+  } else if( this.user_of ) {
+    // The object we're using is made invisible, as the animation contains both
+    // the humanoid and the object. Hence send the click onto the object.
+    this.user_of->onClick(ui, button);
+  }
+  Humanoid.onClick(this, ui, button);
+}
+
+function Patient::setDisease(disease) {
+  this.disease = disease;
+  disease.initPatient(this);
+  this.diagnosed = false;
+  this.diagnosis_progress = 0;
+  this.cure_rooms_visited = 0;
+  // Copy list of diagnosis rooms
+  // (patient may visit these for diagnosis, if they exist in the hospital).
+  this.available_diagnosis_rooms = {};
+  for( i, room in ipairs(this.disease.diagnosis_rooms) ) {
+    this.available_diagnosis_rooms[i] = room;
+  }
+  // Decide an insurance company, one out of four patients have one.
+  // TODO: May need some balancing, but it is roughly the same as in TH.
+  var company = math.random(1,12);
+  if( company < 4 ) {
+    this.insurance_company = company;
+  }
+  // Randomise thirst and the need to visit the loo soon.
+  // Alien patients do not have the needed animations for these things, so exclude them
+  if( ! this.disease.only_emergency ) {
+    this.attributes["thirst"] = math.random()*0.2;
+    this.attributes["toilet_need"] = math.random()*0.2;
+  }
+  this->updateDynamicInfo();
+}
+
+function Patient::changeDisease(new_disease) {
+  assert(! this.diagnosed, "Cannot change the disease of a diagnosed patient");
+  // These assertions should hold until handling of visual diseases is implemented.
+  assert(this.disease.contagious, "Cannot change the disease of a patient who has a non-contagious disease");
+  assert(new_disease.contagious, "Cannot change a disease to a non-contagious disease");
+
+  var visited_rooms = {};
+
+  // Add all diagnosis room for the old disease.
+  for( _, room in ipairs(this.disease.diagnosis_rooms) ) {
+    visited_rooms[room] = true;
+  }
+
+  // Disable the rooms not yet visited by the patient.
+  for( _, room in ipairs(this.available_diagnosis_rooms) ) {
+    visited_rooms[room] = false;
+  }
+
+  // 'visited_rooms' is now diagnosis rooms that the patient has visited for the old disease.
+
+  // Compute unvisited rooms for the new disease.
+  this.available_diagnosis_rooms = {};
+  for( _, room in ipairs(new_disease.diagnosis_rooms) ) {
+    if( ! visited_rooms[room] ) {
+      this.available_diagnosis_rooms[#this.available_diagnosis_rooms + 1] = room;
+    }
+  }
+
+  this.disease = new_disease; // Finally, make the patient carry the new disease.
+}
+
+//! Mark patient as being diagnosed.
+function Patient::setDiagnosed() {
+  this.diagnosed = true;
+  this.treatment_history[#this.treatment_history + 1] = this.disease.name;
+
+  var window = this.world.ui->getWindow(UIPatient);
+  if( window && window.patient == this ) {
+    window->updateInformation();
+  }
+
+  this->updateDynamicInfo();
+}
+
+// Modifies the diagnosis progress of a patient.
+// incrementValue can be either positive or negative.
+function Patient::modifyDiagnosisProgress(incrementValue) {
+  this.diagnosis_progress = math.min(this.hospital.policies["stop_procedure"],
+    this.diagnosis_progress + incrementValue);
+  this.diagnosis_progress = math.max(0.000, this.diagnosis_progress);
+  var window = this.world.ui->getWindow(UIPatient);
+  if( window && window.patient == this ) {
+    window->updateInformation();
+  }
+  this->updateDynamicInfo();
+}
+
+// Updates the patients diagnostic progress based on the doctors skill
+// called when they are done using a diagnosis room
+function Patient::completeDiagnosticStep(room) {
+  // Base: depending on difficulty of disease as set in sam file
+  // tiredness reduces the chance of diagnosis if staff member is above 50% tired
+  var multiplier = 1;
+
+  var expertise = this.world.map.level_config.expertise;
+  var diagnosis_difficulty = expertise[this.disease.expertise_id].MaxDiagDiff / 1000;
+  var diagnosis_base = 0.4 * (1 - diagnosis_difficulty);
+  var diagnosis_bonus = 0.4;
+
+  // Did the staff member manage to leave the room before the patient had
+  // a chance to get diagnosed? Then use a default middle value.
+  if( room.staff_member ) {
+    var fatigue = room.staff_member.attributes["fatigue"] || 0;
+
+    // Bonus: based on skill and attn to detail (with some randomness).
+    // additional bonus if the staff member is highly skilled / consultant
+    // tiredness reduces the chance of diagnosis if staff member is above 50% tired
+    if( room.staff_member.profile.skill >= 0.9 ) {
+      multiplier = math.random(1, 5) * (1 - (fatigue -0.5));
+    } else {
+      multiplier = 1 * (1 - (fatigue -0.5));
+    }
+    var divisor = math.random(1, 3);
+    var attn_detail = room.staff_member.profile.attention_to_detail / divisor;
+    var skill = room.staff_member.profile.skill / divisor;
+    diagnosis_bonus = (attn_detail + 0.4) * skill;
+  }
+  this->modifyDiagnosisProgress(diagnosis_base + (diagnosis_bonus * multiplier));
+}
+
+// Sets the hospital for the patient - additionally removing them from a
+// hospital if they already belong to one. For player hospitals, patients who
+// are not debug or emergency patients are made to seek a reception desk.
+//!param hospital (Hospital): hospital to assign to patient
+function Patient::setHospital(hospital) {
+  if( this.hospital ) {
+    this.hospital->removePatient(this);
+  }
+  Humanoid.setHospital(this, hospital);
+  if( hospital.is_in_world && ! this.is_debug && ! this.is_emergency ) {
+    this->setNextAction(SeekReceptionAction());
+  }
+  hospital->addPatient(this);
+}
+
+//! Decide the ID of the disease or treatment that the patient is paying for.
+//!return (string or nil) Id of the disease or treatment, or nil if the Id could
+//! not be decided.
+function Patient::getTreatmentDiseaseId() {
+  if( this.diagnosed ) {
+    return this.disease.id;
+  } else {
+    var room_info = this->getRoom();
+    if( ! room_info ) {
+      print("Warning: Trying to receive money for treated patient who is "..
+          "not in a room");
+      return null;
+    }
+    room_info = room_info.room_info;
+    return "diag_" .. room_info.id;
+  }
+}
+
+//! Estimate the subjective perceived distortion between the price level the
+//! patient might expect considering the reputation and the cure effectiveness
+//! of a given treatment and the staff internal state.
+//!param casebook (table): casebook entry for the treatment.
+//!return (float) [-1, 1]. The smaller the value is, the more the patient
+//! considers the bill to be under-priced. The bigger the value is, the more
+//! the patient patient considers the bill to be over-priced.
+function Patient::getPriceDistortion(casebook) {
+  // weights
+  var happiness_weight = 0.1;
+  var reputation_weight = 0.6;
+  var effectiveness_weight = 0.3;
+
+  // map the different variables to [0-1] and merge them
+  var reputation = casebook.reputation || this.hospital.reputation;
+  var effectiveness = casebook.cure_effectiveness;
+
+  var weighted_happiness = happiness_weight * this.attributes.happiness;
+  var weighted_reputation = reputation_weight * (reputation / 1000);
+  var weighted_effectiveness = effectiveness_weight * (effectiveness / 100);
+
+  var expected_price_level = weighted_happiness + weighted_reputation + weighted_effectiveness;
+
+  // map to [0-1]
+  var price_level = ((casebook.price - 0.5) / 3) * 2;
+
+  return price_level - expected_price_level;
+}
+
+//! Handle attempting to treat this patient
+//!
+//! If the treatment is effective the patient will be sent home, otherwise they
+//! will die. The patient may or may not agree to pay for the treatment
+//! depending on whether they consider the price reasonable.
+function Patient::treatDisease() {
+  var hospital = this.hospital;
+
+  hospital->receiveMoneyForTreatment(this);
+
+  // Either the patient is no longer sick, or he/she dies.
+  if( this->isTreatmentEffective() ) {
+    this->cure();
+    this.treatment_history[#this.treatment_history + 1] = _S.dynamic_info.patient.actions.cured;
+    this->goHome("cured");
+  } else {
+    this->die();
+  }
+
+  hospital->updatePercentages();
+  hospital->paySupplierForDrug(this.disease.id);
+  if( this.is_emergency ) {
+    hospital->checkEmergencyOver();
+  }
+}
+
+//! Returns true if patient agrees to pay for the given treatment.
+//!param disease_id (string): The id of the disease to test
+function Patient::agreesToPay(disease_id) {
+  var casebook = this.hospital.disease_casebook[disease_id];
+  var price_distortion = this->getPriceDistortion(casebook);
+  var is_over_priced = price_distortion > this.hospital.over_priced_threshold;
+
+  return ! (is_over_priced && math.random(1, 5) == 1);
+}
+
+//! Either the patient is cured, or he/she dies.
+//!return (boolean) True if cured, false if died.
+function Patient::isTreatmentEffective() {
+  var cure_chance = this.hospital.disease_casebook[this.disease.id].cure_effectiveness;
+  cure_chance = cure_chance * this.diagnosis_progress;
+
+  var die = this.die_anims && math.random(1, 100) > cure_chance;
+  return ! die;
+}
+
+//! Change patient internal state to "cured".
+function Patient::cure() {
+  this.cured = true;
+  this.infected = false;
+  this.attributes["health"] = 1;
+}
+
+function Patient::die() {
+  // It may happen that this patient was just cured and then the room blew up.
+  var hospital = this.hospital;
+
+  if( hospital.num_deaths < 1 ) {
+    this.world.ui.adviser->say(_A.information.first_death);
+  }
+  hospital->humanoidDeath(this);
+  if( ! this.is_debug ) {
+    var casebook = hospital.disease_casebook[this.disease.id];
+    casebook.fatalities = casebook.fatalities + 1;
+  }
+  hospital->msgKilled();
+  this->setMood("dead", "activate");
+  this.world.ui->playSound("boo.wav"); // this sound is always heard
+  this.going_home = true;
+  if( this->getRoom() ) {
+    this->queueAction(MeanderAction()->setCount(1));
+  } else {
+    this->setNextAction(MeanderAction()->setCount(1));
+  }
+  if( this.is_emergency ) {
+    hospital.emergency.killed_emergency_patients = hospital.emergency.killed_emergency_patients + 1;
+  }
+  this->queueAction(DieAction());
+  this->updateDynamicInfo(_S.dynamic_info.patient.actions.dying);
+}
+
+function Patient::canPeeOrPuke(current) {
+  return ((current.name == "walk" || current.name == "idle" ||
+           current.name == "seek_room" || current.name == "queue") &&
+      ! this.going_home && this.world.map.th->getCellFlags(this.tile_x, this.tile_y).buildable);
+}
+
+//! Animations for when there is an earth quake
+function Patient::falling() {
+  var current = this->getCurrentAction();
+  current.keep_reserved = true;
+  if( this.falling_anim && this->canPeeOrPuke(current) && this.has_fallen == 1 ) {
+    this->setNextAction(FallingAction(), 0);
+    this.has_fallen = 2;
+    if( this.has_fallen == 2 ) {
+      this->setNextAction(OnGroundAction());
+      this.on_ground = true;
+    }
+    if( this.on_ground ) {
+      this->setNextAction(GetUpAction());
+    }
+    if( current.name == "idle" || current.name == "walk" ) {
+      this->queueAction({
+        name = current.name,
+        x = current.x,
+        y = current.y,
+        must_happen = current.must_happen,
+        is_entering = current.is_entering,
+      }, 2);
+    } else {
+      this->queueAction({
+        name = current.name,
+        room_type = current.room_type,
+        message_sent = true,
+        diagnosis_room = current.diagnosis_room,
+        treatment_room = current.treatment_room,
+      }, 2);
+    }
+    if( current.on_interrupt ) {
+      current.on_interrupt(current, this);
+    } else {
+      this->finishAction();
+    }
+    this.on_ground = false;
+    if( math.random(1, 5) == 3 ) {
+      this->shakeFist();
+    }
+    this->fallingAnnounce();
+    this->changeAttribute("happiness", -0.05); // falling makes you very unhappy
+  } else {
+    return;
+  }
+}
+
+function Patient::fallingAnnounce() {
+  var msg = {
+  (_A.warnings.falling_1),
+  (_A.warnings.falling_2),
+  (_A.warnings.falling_3),
+  (_A.warnings.falling_4),
+  (_A.warnings.falling_5),
+  (_A.warnings.falling_6),
+  };
+  if( msg ) {
+    this.world.ui.adviser->say(msg[math.random(1, #msg)]);
+  }
+}
+
+//! Perform 'shake fist' action.
+function Patient::shakeFist() {
+  if( this.shake_fist_anim ) {
+    this->queueAction(ShakeFistAction(), 1);
+  }
+}
+
+function Patient::vomit() {
+  var current = this->getCurrentAction();
+  //Only vomit under these conditions. Maybe I should add a vomit for patients in queues too?
+  if( this->canPeeOrPuke(current) && this.has_vomitted == 0 ) {
+    this->queueAction(VomitAction(), 1);
+    if( current.name == "idle" || current.name == "walk" ) {
+      this->queueAction({
+        name = current.name,
+        x = current.x,
+        y = current.y,
+        must_happen = current.must_happen,
+        is_entering = current.is_entering,
+      }, 2);
+    } else {
+      this->queueAction({
+        name = current.name,
+        room_type = current.room_type,
+        message_sent = true,
+        diagnosis_room = current.diagnosis_room,
+        treatment_room = current.treatment_room,
+      }, 2);
+    }
+    if( current.on_interrupt ) {
+      current.on_interrupt(current, this);
+    } else {
+      this->finishAction();
+    }
+    this.has_vomitted = this.has_vomitted + 1;
+    this->changeAttribute("happiness", -0.02); // being sick makes you unhappy
+  } else {
+    return;
+  }
+}
+
+function Patient::pee() {
+  var current = this->getCurrentAction();
+  //Only pee under these conditions. As with vomit, should they also pee if in a queue?
+  if( this->canPeeOrPuke(current) ) {
+    this->queueAction(PeeAction(), 1);
+    if( current.name == "idle" || current.name == "walk" ) {
+      this->queueAction({
+        name = current.name,
+        x = current.x,
+        y = current.y,
+        must_happen = current.must_happen,
+        is_entering = current.is_entering,
+      }, 2);
+    } else {
+      this->queueAction({
+        name = current.name,
+        room_type = current.room_type,
+        message_sent = true,
+        diagnosis_room = current.diagnosis_room,
+        treatment_room = current.treatment_room,
+      }, 2);
+    }
+    if( current.on_interrupt ) {
+      current.on_interrupt(current, this);
+    } else {
+      this->finishAction();
+    }
+    this->setMood("poo", "deactivate");
+    this->changeAttribute("happiness", -0.02); // not being able to find a loo and doing it in the corridor will make you sad too
+    if( ! this.hospital.did_it_on_floor ) {
+      this.hospital.did_it_on_floor = true;
+      this.world.ui.adviser->say(_A.warnings.people_did_it_on_the_floor);
+    }
+  } else {
+    return;
+  }
+}
+
+function Patient::checkWatch() {
+  if( this.check_watch_anim && ! this->getCurrentAction().is_leaving ) {
+    this->queueAction(CheckWatchAction(), 0);
+  }
+}
+
+function Patient::yawn() {
+  var action = this->getCurrentAction();
+  if( this.yawn_anim && action.name == "idle" ) {
+    this->queueAction(YawnAction(), 0);
+  }
+}
+
+function Patient::tapFoot() {
+  if( this.tap_foot_anim && ! this->getCurrentAction().is_leaving ) {
+    this->queueAction(TapFootAction(), 0);
+  }
+}
+
+//! Make the patient leave the hospital. This function also handles some
+//! statistics (number of cured/kicked out patients, etc.)
+//! The mood icon is updated accordingly. Reputation is impacted accordingly.
+//!param reason (string): the reason why the patient is sent home, which could be:
+//! -"cured": When the patient is cured.
+//! -"kicked": When the patient is kicked anyway, either manually,
+//! either when no treatment can be found for her/him, etc.
+//! -"over_priced": When the patient decided to leave because he/she believes
+//! the last treatment is over-priced.
+//param disease_id (string): When the reason is "over_priced" this is the
+//! id of the disease/diagnosis that the patient considered over_priced
+function Patient::goHome(reason, disease_id) {
+  var hosp = this.hospital;
+  if( this.going_home ) {
+    // The patient should be going home already! Anything related to the hospital
+    // will not be updated correctly, but we still want to try to get the patient to go home.
+    TheApp.world->gameLog("Warning: goHome called when the patient is already going home");
+    this->despawn();
+    return;
+  }
+  if( reason == "cured" ) {
+    this->setMood("cured", "activate");
+    this->changeAttribute("happiness", 0.8);
+    this.world.ui->playSound("cheer.wav"); // This sound is always heard
+    this.hospital->updateCuredCounts(this);
+    this->updateDynamicInfo(_S.dynamic_info.patient.actions.cured);
+    this.hospital->msgCured();
+
+  } else if( reason == "kicked" ) {
+    this->setMood("exit", "activate");
+    this.hospital->updateNotCuredCounts(this, reason);
+
+  } else if( reason == "over_priced" ) {
+    this->setMood("sad_money", "activate");
+    this->changeAttribute("happiness", -0.5);
+
+    var treatment_name = this.hospital.disease_casebook[disease_id].disease.name;
+    this.world.ui.adviser->say(_A.warnings.patient_not_paying->format(treatment_name));
+    this.hospital->updateNotCuredCounts(this, reason);
+    this->clearDynamicInfo();
+    this->updateDynamicInfo(_S.dynamic_info.patient.actions.prices_too_high);
+
+  } else {
+    TheApp.world->gameLog("Error: unknown reason " .. reason .. "!");
+  }
+
+  hosp->updatePercentages();
+
+  if( this.is_debug ) {
+    hosp->removeDebugPatient(this);
+  }
+  // Remove any messages and/or callbacks related to the patient.
+  this->unregisterCallbacks();
+
+  this.going_home = true;
+  this.waiting = null;
+
+  // Remove any vaccination calls from patient
+  if( ! this.vaccinated ) {
+    this.world.dispatcher->dropFromQueue(this);
+  }
+
+  var room = this->getRoom();
+  if( room ) {
+    room->makeHumanoidLeave(this);
+  }
+  this->despawn();
+}
+
+// Despawns the patient and removes them from the hospital
+function Patient::despawn() {
+  this.hospital->removePatient(this);
+  Humanoid.despawn(this);
+}
+
+// This function handles changing of the different attributes of the patient.
+// For example if thirst gets over a certain level (now: 0.7), the patient
+// tries to find a drinks machine nearby.
+function Patient::tickDay() {
+  // First of all it may happen that this patient is tired of waiting and goes home.
+  if( this.waiting ) {
+    this.waiting = this.waiting - 1;
+    if( this.waiting == 0 ) {
+      this->goHome("kicked");
+      if( this.diagnosed ) {
+        // No treatment rooms
+        this->updateDynamicInfo(_S.dynamic_info.patient.actions.no_treatment_available);
+      } else {
+        // No diagnosis rooms
+        this->updateDynamicInfo(_S.dynamic_info.patient.actions.no_diagnoses_available);
+      }
+    } else if( this.waiting == 10 ) {
+      this->tapFoot();
+    } else if( this.waiting == 20 ) {
+      this->yawn();
+    } else if( this.waiting == 30 ) {
+      this->checkWatch();
+    }
+
+    if( this.has_vomitted && this.has_vomitted > 0 ) {
+      this.has_vomitted = 0;
+    }
+  }
+
+  // if patients are getting unhappy, then maybe we should see this!
+  if( this.attributes["happiness"] < 0.3 ) {
+    this->setMood("sad7", "activate");
+  } else {
+    this->setMood("sad7", "deactivate");
+  }
+  // Now call the parent function - it checks
+  // if we're outside the hospital or on our way home.
+  if( ! Humanoid.tickDay(this) ) {
+    return;
+  }
+  // Die before we poo or drink
+  // patient has been in the hospital for over 6 months and is still not well, so will become sad and will either get fed up and leave
+  // or stay in the hope that you will cure them before they die
+  // strange, but in TH happiness does not go down, even when close to death IMO that is wrong as you would be unhappy if you waited too long.
+  // TODO death animation for slack female is missing its head. For now the only option is for her to get fed up and leave
+  // this can be changed when the animation thing is resolved
+  // TODO clean up this block, nonmagical numbers
+  if( this.attributes["health"] >= 0.18 && this.attributes["health"] < 0.22 ) {
+    this->setMood("sad2", "activate");
+    this->changeAttribute("happiness", -0.0002); // waiting too long will make you sad
+    // There is a 1/3 chance that the patient will get fed up and leave
+    // note, this is potentially run 10 ((0.22-0.18)/0.004) times, hence the 1/30 chance.
+    if( math.random(1,30) == 1 ) {
+      this->updateDynamicInfo(_S.dynamic_info.patient.actions.fed_up);
+      this->setMood("sad2", "deactivate");
+      this->goHome("kicked");
+    }
+  } else if( this.attributes["health"] >= 0.14 && this.attributes["health"] < 0.18 ) {
+    this->setMood("sad2", "deactivate");
+    this->setMood("sad3", "activate");
+  // now wishes they had gone to that other hospital
+  } else if( this.attributes["health"] >= 0.10 && this.attributes["health"] < 0.14 ) {
+    this->setMood("sad3", "deactivate");
+    this->setMood("sad4", "activate");
+  // starts to take a turn for the worse and is slipping away
+  } else if( this.attributes["health"] >= 0.06 && this.attributes["health"] < 0.10 ) {
+    this->setMood("sad4", "deactivate");
+    this->setMood("sad5", "activate");
+  // fading fast
+  } else if( this.attributes["health"] >= 0.01 && this.attributes["health"] < 0.06 ) {
+    this->setMood("sad5", "deactivate");
+    this->setMood("sad6", "activate");
+  // its not looking good
+  } else if( this.attributes["health"] > 0.00 && this.attributes["health"] < 0.01 ) {
+    this.attributes["health"] = 0.0;
+  // is there time to say a prayer
+  } else if( this.attributes["health"] == 0.0 ) {
+    // people who are in a room should not die:
+    // 1. they are being cured in this moment. dying in the last few seconds
+    //    before the cure makes only a subtle difference for gameplay
+    // 2. they will leave the room soon (toilets, diagnostics) and will die then
+    if( ! this->getRoom() && ! this->getCurrentAction().is_leaving ) {
+      this->setMood("sad6", "deactivate");
+      this->die();
+    }
+    //dead people aren't thirsty
+    return;
+  }
+
+  // Note: to avoid empty action queue error if the player spam clicks a patient at the same time as the day changes
+  // there is now an inbetween "neutal" stage.
+  if( this.has_fallen == 3 ) {
+    this.has_fallen = 1;
+  } else if( this.has_fallen == 2 ) {
+    this.has_fallen = 3;
+  }
+
+  // Update health history.
+  if( ! this.health_history ) {
+    // First day, initialize health history.
+    this.health_history = {};
+    this.health_history[1] = this.attributes["health"];
+    this.health_history["last"] = 1;
+    this.health_history["size"] = 20;
+  } else {
+    // Update the health history, wrapping around the array.
+    var last = this.health_history["last"] + 1;
+    if( last > this.health_history["size"] ) { last = 1; }
+    this.health_history[last] = this.attributes["health"];
+    this.health_history["last"] = last;
+  }
+
+  // Vomitings.
+  if( this.vomit_anim && ! this->getRoom() && ! this->getCurrentAction().is_leaving && ! this->getCurrentAction().is_entering ) {
+    //Nausea level is based on health then proximity to vomit is used as a multiplier.
+    //Only a patient with a health value of less than 0.8 can be the initial vomiter, however :)
+    var initialVomitMult = 0.002; //The initial chance of vomiting.
+    var proximityVomitMult = 1.5; //The multiplier used when in proximity to vomit.
+    var nausea = (1.0 - this.attributes["health"]) * initialVomitMult;
+    var foundVomit = {};
+    var numVomit = 0;
+
+    this.world->findObjectNear(this, "litter", 2, function(x, y) {
+      var litter = this.world->getObject(x, y, "litter");
+    if( ! litter ) {
+    return;
+    }
+      if( litter->vomitInducing() ) {
+        var alreadyFound = false;
+        for( i=1,numVomit ) {
+          if( foundVomit[i] == litter ) {
+            alreadyFound = true;
+            break;
+          }
+        }
+
+        if( ! alreadyFound ) {
+          ++numVomit    ;
+          foundVomit[numVomit] = litter;
+        }
+      }
+      // seeing litter will make you unhappy. If it is pee or puke it is worse
+      if( litter->anyLitter() ) {
+        this->changeAttribute("happiness", -0.0002);
+      } else {
+        this->changeAttribute("happiness", -0.0004);
+      }
+    }); // End of findObjectNear
+    // As we don't yet have rats, ratholes and dead rats the chances of vomitting are slim
+    // as a temp fix for this I have added 0.5 to the < nausea equation,
+    // this may want adjusting or removing when the other factors are in the game MarkL
+    if( this.attributes["health"] <= 0.8 || numVomit > 0 || this.attributes["happiness"] < 0.6 ) {
+      nausea = nausea * ((numVomit+1) * proximityVomitMult);
+      if( math.random() < nausea + 0.5 ) {
+        this->vomit();
+      }
+    }
+  }
+
+  // It is nice to see plants, but dead plants make you unhappy
+  this.world->findObjectNear(this, "plant", 2, function(x, y) {
+    var plant = this.world->getObject(x, y, "plant");
+  if( ! plant ) {
+    return;
+  }
+    if( plant->isPleasing() ) {
+      this->changeAttribute("happiness", 0.0002);
+    } else {
+      this->changeAttribute("happiness", -0.0002);
+    }
+  });
+  // It always makes you happy to see you are in safe place
+  this.world->findObjectNear(this, "extinguisher", 2, function(x, y) {
+    this->changeAttribute("happiness", 0.0002);
+  });
+  // sitting makes you happy whilst standing and walking does not
+  if( this->goingToUseObject("bench") ) {
+    this->changeAttribute("happiness", 0.00002);
+  } else {
+    this->changeAttribute("happiness", -0.00002);
+  }
+
+  // Each tick both thirst, warmth and toilet_need changes and health decreases.
+  this->changeAttribute("thirst", this.attributes["warmth"]*0.02+0.004*math.random() + 0.004);
+  this->changeAttribute("health", - 0.004);
+  if( this.disease.more_loo_use ) {
+    this->changeAttribute("toilet_need", 0.018*math.random() + 0.008);
+  } else {
+    this->changeAttribute("toilet_need", 0.006*math.random() + 0.002);
+  }
+  // Maybe it's time to visit the loo?
+  if( this.attributes["toilet_need"] && this.attributes["toilet_need"] > 0.75 ) {
+    if( this.pee_anim && ! this->getCurrentAction().is_leaving &&
+        ! this->getCurrentAction().is_entering && ! this.in_room ) {
+      if( math.random(1, 10) < 5 ) {
+        this->pee();
+        this->changeAttribute("toilet_need", -(0.5 + math.random()*0.15));
+        this.going_to_toilet = "no";
+      } else {
+        // If waiting for user response, do not send to toilets, as this messes
+        // things up.
+        if( this.going_to_toilet == "no" && ! this.waiting ) {
+          this->setMood("poo", "activate");
+          // Check if any room exists.
+          if( ! this.world->findRoomNear(this, "toilets") ) {
+            this.going_to_toilet = "no-toilets"; // Gets reset when a new toilet is built (then, patient will try again).
+          // Otherwise we can queue the action, but only if not in any rooms right now.
+          } else if( ! this->getRoom() && ! this->getCurrentAction().is_leaving && ! this->getCurrentAction().pee ) {
+            this->setNextAction(SeekToiletsAction()->setMustHappen(true));
+            this.going_to_toilet = "yes";
+          }
+        }
+      }
+    }
+  }
+  if( this.disease.yawn && math.random(1, 10) == 5 ) {
+    this->yawn();
+  }
+
+  // If thirsty enough a soda would be nice
+  if( this.attributes["thirst"] && this.attributes["thirst"] > 0.7 ) {
+    this->changeAttribute("happiness", -0.002);
+    this->setMood("thirsty", "activate");
+    // If there's already an action to buy a drink in the action queue, or
+    // if we're going to the loo, do nothing
+    if( this->goingToUseObject("drinks_machine") || this.going_to_toilet != "no" ) {
+      return;
+    }
+    // Don't check for a drinks machine too often
+    if( this.timeout && this.timeout > 0 ) {
+      this.timeout = this.timeout - 1;
+      return;
+    }
+    // The only allowed situations to grab a soda is when queueing
+    // or idling/walking in the corridors
+    // Also make sure the walk action when leaving a room has a chance to finish.
+    if( ! this->getRoom() && ! this->getCurrentAction().is_leaving && ! this.going_home ) {
+      var machine, lx, ly = this.world->
+          findObjectNear(this, "drinks_machine", 8);
+
+      // If no machine can be found, resume previous action and wait a
+      // while before trying again. To get a little randomness into the picture
+      // it's not certain we go for it right now.
+      if( ! machine || ! lx || ! ly || math.random(1,10) < 3 ) {
+        this.timeout = math.random(2,4);
+        return;
+      }
+
+      // Callback function when the machine has been used
+      var /*persistable:patient_drinks_machine_after_use*/ function after_use() {
+        this->changeAttribute("thirst", -(0.7 + math.random()*0.3));
+        this->changeAttribute("toilet_need", 0.05 + math.random()*0.05);
+        this->setMood("thirsty", "deactivate");
+        // The patient might be kicked while buying a drink
+        if( ! this.going_home ) {
+          this.hospital->sellSodaToPatient(this);
+        }
+        // The patient might also throw the can on the floor, bad patient!
+        if( math.random() < 0.6 ) {
+          // It will be dropped between 1 and 12 tiles away (litter bin catches 8 radius).
+          this.litter_countdown = math.random(1, 12);
+        }
+      }
+
+      // If we are queueing, let the queue handle the situation.
+      for( _, current_action in ipairs(this.action_queue) ) {
+        if( current_action.name == "queue" ) {
+          var callbacks = current_action.queue.callbacks[this];
+          if( callbacks ) {
+            callbacks->onGetSoda(this, machine, lx, ly, after_use);
+            return;
+          }
+        }
+      }
+
+      // Or, if walking or idling insert the needed actions in
+      // the beginning of the queue
+      var current = this->getCurrentAction();
+      if( current.name == "walk" || current.name == "idle" || current.name == "seek_room" ) {
+        // Go to the machine, use it, and then continue with
+        // whatever he/she was doing.
+        current.keep_reserved = true;
+        this->queueAction(WalkAction(lx, ly)->setMustHappen(true)->disableTruncate(), 1);
+        this->queueAction(UseObjectAction(machine)->setAfterUse(after_use)->setMustHappen(true), 2);
+        machine->addReservedUser(this);
+        // Insert the old action again, a little differently depending on
+        // what the previous action was.
+        if( current.name == "idle" || current.name == "walk" ) {
+          this->queueAction({
+            name = current.name,
+            x = current.x,
+            y = current.y,
+            must_happen = current.must_happen,
+            is_entering = current.is_entering,
+          }, 3);
+          // If we were idling, also go away a little before continuing with
+          // that important action.
+          if( current.name == "idle" ) {
+            this->queueAction(MeanderAction()->setCount(1), 3);
+          }
+        } else { // We were seeking a room, start that action from the beginning
+             // i.e. do not set the must_happen flag.
+          this->queueAction({
+            name = current.name,
+            room_type = current.room_type,
+            message_sent = true,
+            diagnosis_room = current.diagnosis_room,
+            treatment_room = current.treatment_room,
+          }, 3);
+        }
+        if( current.on_interrupt ) {
+          current.on_interrupt(current, this);
+        } else {
+          this->finishAction();
+        }
+      }
+    }
+  }
+
+  // If the patient is sitting on a bench or standing and queued,
+  // it may be a situation where he/she is not in the queue
+  // anymore, but should be. If this is the case for more than
+  // 2 ticks, go to reception
+  if( #this.action_queue > 1 && (this->getCurrentAction().name == "use_object" ||
+      this->getCurrentAction().name == "idle") &&
+      this.action_queue[2].name == "queue" ) {
+    var found = false;
+    for( _, humanoid in ipairs(this.action_queue[2].queue) ) {
+      if( humanoid == this ) {
+        found = true;
+        break;
+      }
+    }
+
+    if( ! found ) {
+      if( ! this.noqueue_ticks ) {
+        this.noqueue_ticks = 1;
+      } else if( this.noqueue_ticks > 2 ) {
+        this.world->gameLog("A patient has a queue action, but is not in the corresponding queue");
+        this->setNextAction(SeekReceptionAction());
+      } else {
+        this.noqueue_ticks = this.noqueue_ticks + 1;
+      }
+    } else {
+      this.noqueue_ticks = 0;
+    }
+  }
+}
+
+function Patient::notifyNewRoom(room) {
+  Humanoid.notifyNewRoom(this, room);
+  if( this.going_to_toilet == "no-toilets" && room.room_info.id == "toilets" ) {
+    this.going_to_toilet = "no"; // Patient can try again going to the loo.
+  }
+}
+
+// Called each time the patient moves to a new tile.
+function Patient::setTile(x, y) {
+  if( ! this.litter_countdown ) {
+    // If arrived at the first tile of the hospital, give patient some litter.
+    if( x && this.world.map.th->getCellFlags(x, y).buildable ) {
+      // Small hospitals are around 40-50 tiles.
+      this.litter_countdown = math.random(20, 100);
+    }
+
+  } else if( this.hospital && ! this.going_home ) {
+    this.litter_countdown = this.litter_countdown - 1;
+
+    // Is the patient about to drop some litter?
+    if( this.litter_countdown == 0 ) {
+      if( x && ! this->getRoom() && ! this.world->getObjects(x, y) &&
+          this.world.map.th->getCellFlags(x, y).buildable &&
+          (! this.world->findObjectNear(this, "bin", 8) || math.random() < 0.05) ) {
+        // Drop some litter!
+        var trash = math.random(1, 4);
+        var litter = this.world->newObject("litter", x, y);
+        litter->setLitterType(trash, math.random(0, 1));
+        if( ! this.hospital.hospital_littered ) {
+          this.hospital.hospital_littered = true;
+
+          // A callout is only needed if there are no handymen employed
+          if( ! this.hospital->hasStaffOfCategory("Handyman") ) {
+            this.world.ui.adviser->say(_A.staff_advice.need_handyman_litter);
+          }
+        }
+      }
+
+      // Always give new litter to drop.
+      this.litter_countdown = math.random(30, 150);
+    }
+  }
+
+  Humanoid.setTile(this, x, y);
+}
+
+// As of now each time a bench is placed the world notifies all patients
+// in the vicinity through this function.
+function Patient::notifyNewObject(id) {
+  // If currently queueing it would be nice to be able to sit down.
+  assert(id == "bench", "Can only handle benches at the moment");
+  // Look for a queue action and tell this patient to look for a bench
+  // if currently standing up.
+  for( _, action in ipairs(this.action_queue) ) {
+    if( action.name == "queue" ) {
+      var callbacks = action.queue.callbacks[this];
+      if( callbacks ) {
+        assert(action.done_init, "Queue action was not yet initialized");
+        if( action->isStanding() ) {
+          callbacks->onChangeQueuePosition(this);
+          break;
+        }
+      }
+    }
+  }
+}
+
+function Patient::addToTreatmentHistory(room) {
+  var should_add = true;
+  // Do not add facility rooms such as toilets to the treatment history.
+  for( i, _ in pairs(room.categories) ) {
+    if( i == "facilities" ) {
+      should_add = false;
+      break;
+    }
+  }
+  if( should_add ) {
+    this.treatment_history[#this.treatment_history + 1] = room.name;
+  }
+}
+
+function Patient::updateDynamicInfo(action_string) {
+  // Retain the old text if only an update is wanted, i.e. no new string is supplied.
+  if( action_string == null ) {
+    if( this.action_string ) {
+      action_string = this.action_string;
+    } else {
+      action_string = "";
+    }
+  } else {
+    this.action_string = action_string;
+  }
+  var info = "";
+  if( this.going_home ) {
+    this->setDynamicInfo('progress', null);
+  } else if( this.diagnosed ) {
+    if( this.diagnosis_progress < 1.0 ) {
+      // The cure was guessed
+      info = _S.dynamic_info.patient.guessed_diagnosis->format(this.disease.name);
+    } else {
+      info = _S.dynamic_info.patient.diagnosed->format(this.disease.name);
+    }
+    this->setDynamicInfo('progress', null);
+  } else {
+    info = _S.dynamic_info.patient.diagnosis_progress;
+    // TODO: If the policy is changed this info will not be changed until the next
+    // diagnosis facility has been visited.
+    var divider = 1;
+    if( this.hospital ) {
+      divider = this.hospital.policies["stop_procedure"];
+    }
+    if( this.diagnosis_progress ) {
+      this->setDynamicInfo('progress', math.min(1.0, this.diagnosis_progress / divider));
+    }
+  }
+  // Set the centre line of dynamic info based on contagiousness, if appropriate
+  var epidemic = this.hospital && this.hospital.epidemic;
+  if( epidemic && epidemic.coverup_in_progress ) {
+    if( this.infected && ! this.vaccinated ) {
+      this->setDynamicInfo('text',
+        {action_string, _S.dynamic_info.patient.actions.epidemic_contagious, info});
+    } else if( this.vaccinated ) {
+      this->setDynamicInfo('text',
+        {action_string, _S.dynamic_info.patient.actions.epidemic_vaccinated, info});
+    }
+  } else {
+    this->setDynamicInfo('text', {action_string, "", info});
+  }
+}
+
+/* Update availability of a choice in message owned by this patient, if any
+!param choice (string) The choice that needs updating (currently "research" or "guess_cure").
+*/
+function Patient::updateMessage(choice) {
+  if( this.message && this.message.choices ) {
+    var enabled = false;
+    if( choice == "research" ) {
+      // enable only if research department is built and a room in the treatment chain is undiscovered
+      if( this.hospital->hasRoomOfType("research") ) {
+        var req = this.hospital->checkDiseaseRequirements(this.disease.id);
+        if( req ) {
+          for( _, room_id in ipairs(req.rooms) ) {
+            var room = this.world.available_rooms[room_id];
+            if( room && this.hospital.undiscovered_rooms[room] ) {
+              enabled = true;
+              break;
+            }
+          }
+        }
+      }
+    } else { // if choice == "guess_cure" then
+      // TODO: implement
+    }
+
+    for( _, c in ipairs(this.message.choices) ) {
+      if( c.choice == choice ) {
+        c.enabled = enabled;
+      }
+    }
+
+    // Update the fax window if it is open.
+    var window = this.world.ui->getWindow(UIFax);
+    if( window ) {
+      window->updateChoices();
+    }
+
+  }
+}
+
+/* If the patient is not a vaccination candidate then
+  give them the arrow icon and candidate status */
+function Patient::giveVaccinationCandidateStatus() {
+  this->setMood("epidemy2","deactivate");
+  this->setMood("epidemy3","activate");
+  this.vaccination_candidate = true;
+}
+
+/*Remove the vaccination candidate icon and status from the patient*/
+function Patient::removeVaccinationCandidateStatus() {
+  if( ! this.vaccinated ) {
+    this->setMood("epidemy3","deactivate");
+    this->setMood("epidemy2","activate");
+    this.vaccination_candidate = false;
+  }
+}
+
+
+function Patient::afterLoad(old, new) {
+  if( old < 68 ) {
+    if( this.going_home ) {
+      this.waiting = null;
+    }
+  }
+  if( old < 87 ) {
+    if( this.die_anims == null ) {
+      this.die_anims = {};
+    }
+
+    // New humanoid animation: rise_hell_east:
+    if( this->isMalePatient() ) {
+      if( this.humanoid_class != "Alternate Male Patient" ) {
+        this.die_anims.rise_hell_east = 384;
+      } else {
+        this.die_anims.rise_hell_east = 3404;
+      }
+    } else {
+      this.die_anims.rise_hell_east = 580;
+    }
+  }
+  if( old < 108 ) {
+    if( this.going_to_toilet ) {
+      // Not easily decidable what the patient is doing here,
+      // removing a toilet while it's used is unlikely to happen.
+      if( this.world->findRoomNear(this, "toilets") ) {
+        this.going_to_toilet = "yes";
+      } else {
+        this.going_to_toilet = "no-toilets";
+      }
+    } else {
+      this.going_to_toilet = "no";
+    }
+  }
+  Humanoid.afterLoad(this, old, new);
+}
+
+function Patient::isMalePatient() {
+  if( string.find(this.humanoid_class,"Female") ) { return false;
+  } else if( string.find(this.humanoid_class,"Male") ) { return true;
+  } else {
+    var male_patient_classes = {["Chewbacca Patient"] = true,["Elvis Patient"] = true,["Invisible Patient"] = true};
+    return male_patient_classes[this.humanoid_class] != null;
+  }
+}
+
+// Dummy callback for savegame compatibility
+var callbackNewRoom = /*persistable:patient_toilet_build_callback*/ function(room) { };

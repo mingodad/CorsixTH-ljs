@@ -1,0 +1,126 @@
+/* Copyright (c) 2009 Manuel König
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var room = {};
+room.id = "cardiogram";
+room.level_config_id = 12;
+room.class = "CardiogramRoom";
+room.name = _S.rooms_short.cardiogram;
+room.long_name = _S.rooms_long.cardiogram;
+room.tooltip = _S.tooltip.rooms.cardiogram;
+room.objects_additional = { "extinguisher", "radiator", "plant", "bin" };
+room.objects_needed = { cardio = 1, screen = 1 };
+room.build_preview_animation = 918;
+room.categories = {
+  diagnosis = 3,
+};
+room.minimum_size = 4;
+room.wall_type = "yellow";
+room.floor_tile = 19;
+room.required_staff = {
+  Doctor = 1,
+};
+room.maximum_staff = room.required_staff;
+room.call_sound = "reqd001.wav";
+room.handyman_call_sound = "maint010.wav";
+
+class ("CardiogramRoom") (Room);
+
+//-@type CardiogramRoom
+var CardiogramRoom = _G["CardiogramRoom"];
+
+function CardiogramRoom::CardiogramRoom(...) {
+  this->Room(...);
+}
+
+function CardiogramRoom::commandEnteringPatient(patient) {
+  var screen, sx, sy = this.world->findObjectNear(patient, "screen");
+  patient->walkTo(sx, sy);
+
+  var screen_after_use = /*persistable:cardiogram_screen_after_use1*/ function() {
+    var staff = this.staff_member;
+    var cardio, cx, cy = this.world->findObjectNear(patient, "cardio");
+    staff->walkTo(cardio->getSecondaryUsageTile());
+    var staff_idle = IdleAction();
+    staff->queueAction(staff_idle);
+    patient->walkTo(cx, cy);
+
+    var timer = 6;
+    var phase = -2;
+    var cardio_loop_callback = /*persistable:cardiogram_cardio_loop_callback*/ function(action) {
+      if( ! action.on_interrupt ) {
+        action.prolonged_usage = false;
+        patient.num_animation_ticks = 1;
+        return;
+      }
+      --timer    ;
+      if( timer == 0 ) {
+        ++phase    ;
+        if( phase == 3 ) {
+          action.prolonged_usage = false;
+        } else {
+          patient.num_animation_ticks = 3 - math.abs(phase);
+        }
+        timer = 6;
+      } else {
+        action.secondary_anim = 1030;
+      }
+    };
+
+    var cardio_after_use = /*persistable:cardiogram_cardio_after_use*/ function() {
+      if( #staff.action_queue == 1 ) {
+        staff->setNextAction(MeanderAction());
+      } else {
+        staff->finishAction(staff_idle);
+      }
+    };
+
+    patient->queueAction(MultiUseObjectAction(cardio, staff)->setMustHappen(false)
+        ->setProlongedUsage(true)->setLoopCallback(cardio_loop_callback)->setAfterUse(cardio_after_use));
+    patient->queueAction(WalkAction(sx, sy)->setIsLeaving(true)->setMustHappen(false)->disableTruncate());
+
+    var leaving_after_use = /*persistable:cardiogram_screen_after_use2*/ function() {
+      if( #patient.action_queue == 1 ) {
+        this->dealtWithPatient(patient);
+      }
+    };
+    patient->queueAction(UseScreenAction(screen)->setIsLeaving(true)->setMustHappen(true)->setAfterUse(leaving_after_use));
+  };
+
+  patient->queueAction(UseScreenAction(screen)->setAfterUse(screen_after_use));
+  return Room.commandEnteringPatient(this, patient);
+}
+
+function CardiogramRoom::makeHumanoidLeave(humanoid) {
+  this->makeHumanoidDressIfNecessaryAndThenLeave(humanoid);
+}
+
+function CardiogramRoom::onHumanoidLeave(humanoid) {
+  if( this.staff_member == humanoid ) {
+    this.staff_member = null;
+  }
+  Room.onHumanoidLeave(this, humanoid);
+}
+
+function CardiogramRoom::shouldHavePatientReenter(patient) {
+  return ! patient->isLeaving();
+}
+
+return room;

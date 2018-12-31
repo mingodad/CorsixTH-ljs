@@ -1,0 +1,441 @@
+/* Copyright (c) 2011 Ted "IntelOrca" John
+                   2013 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Charts fullscreen window
+class ("UIGraphs") (UIFullscreen);
+
+//-@type UIGraphs
+var UIGraphs = _G["UIGraphs"];
+
+var TH = require("TH");
+
+// These values are based on the background colours of the pen symbols
+var colours = {
+  money_in = {182, 32, 16},
+  money_out = {215, 81, 8},
+  wages = {194, 162, 0},
+  balance = {28, 138, 36},
+  visitors = {0, 101, 198},
+  cures = {36, 40, 154},
+  deaths = {130, 0, 178},
+  reputation = {215, 12, 101}
+};
+
+function UIGraphs::UIGraphs(ui) {
+  this->UIFullscreen(ui);
+  var gfx = ui.app.gfx;
+  if( ! pcall(function() {
+    this.background = gfx->loadRaw("Graph01V", 640, 480);
+    var palette = gfx->loadPalette("QData", "Graph01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    this.panel_sprites = gfx->loadSpriteTable("QData", "Graph02V", true, palette);
+    this.white_font = gfx->loadFont("QData", "Font01V", false, palette);
+    this.black_font = gfx->loadFont("QData", "Font00V", false, palette);
+  }) ) {
+    ui->addWindow(UIInformation(ui, {_S.errors.dialog_missing_graphics}));
+    this->close();
+    return;
+  }
+
+  this.hospital = ui.hospital;
+
+  // Buttons
+  this->addPanel(0, 63, 384)->makeButton(0, 0, 26, 26, 3, this.close)->setTooltip(_S.tooltip.graphs.close);
+
+  // The possible scales are:
+  // 1: Increments of four years per line
+  // 2: Increments of one year per line
+  // 3: Increments of one month per line
+  this.graph_scale = 3;
+
+  this.graph_scale_panel = this->addPanel(0, 371, 384);
+  this.graph_scale_button = this.graph_scale_panel->makeButton(0, 0, 65, 26, 2, this.toggleGraphScale)->setTooltip(_S.tooltip.graphs.scale);
+
+  this.hide_graph = {};
+
+  var function buttons(name) {
+    return /*persistable:graphs_button*/ function() {
+      this->toggleGraph(name);
+    };
+  }
+  this.graph_buttons = {
+    this->addPanel(0, 590, 34)->makeToggleButton(0, 0, 42, 42, 1, buttons("money_in"))->setTooltip(_S.tooltip.graphs.money_in),
+    this->addPanel(0, 590, 86)->makeToggleButton(0, 0, 42, 42, 1, buttons("money_out"))->setTooltip(_S.tooltip.graphs.money_out),
+    this->addPanel(0, 590, 138)->makeToggleButton(0, 0, 42, 42, 1, buttons("wages"))->setTooltip(_S.tooltip.graphs.wages),
+    this->addPanel(0, 590, 190)->makeToggleButton(0, 0, 42, 42, 1, buttons("balance"))->setTooltip(_S.tooltip.graphs.balance),
+    this->addPanel(0, 590, 243)->makeToggleButton(0, 0, 42, 42, 1, buttons("visitors"))->setTooltip(_S.tooltip.graphs.visitors),
+    this->addPanel(0, 590, 295)->makeToggleButton(0, 0, 42, 42, 1, buttons("cures"))->setTooltip(_S.tooltip.graphs.cures),
+    this->addPanel(0, 590, 347)->makeToggleButton(0, 0, 42, 42, 1, buttons("deaths"))->setTooltip(_S.tooltip.graphs.deaths),
+    this->addPanel(0, 590, 400)->makeToggleButton(0, 0, 42, 42, 1, buttons("reputation"))->setTooltip(_S.tooltip.graphs.reputation)
+  };
+
+  this->updateLines();
+}
+
+var TOP_Y = 85; // Top of the graph area
+var BOTTOM_Y = 353; // Bottom of the graph area
+var RIGHT_X = 346; // Right side of the graph area
+var VERT_DX = 25; // Spacing between the vertical lines in the graph
+var VERT_COUNT = 12; // Number of vertical lines in the graph
+var GRAPH_HEIGHT = BOTTOM_Y - TOP_Y;
+
+//! Compute the vertical position of a value in the graph given the line extremes
+//!param graph_line (table) Meta data of the line, including extreme values.
+//!param value (number) Value to position vertically in the graph.
+//!return Y position in the graph of the value.
+var function computeVerticalValuePosition(graph_line, value) {
+  // 0 is always included in the range.
+  assert(graph_line.maximum >= 0 && graph_line.minimum <= 0);
+  var range = graph_line.maximum - graph_line.minimum;
+  if( range == 0 ) { return BOTTOM_Y; }
+
+  return BOTTOM_Y - math.floor(((value - graph_line.minimum) / range) * GRAPH_HEIGHT);
+}
+
+//! Convert graph scale to a stepsize in months.
+//!param graph_scale (int, 1 to 3) Graph scale to display.
+//!return Number of months to jump between statistics values in the hospital statistics data.
+var function getStatisticsStepsize(graph_scale) {
+  var stepsize = 4 * 12; // Four years
+  if( graph_scale == 2 ) {
+    stepsize = 12; // One year
+  } else if( graph_scale == 3 ) {
+    stepsize = 1; // A month
+  }
+  return stepsize;
+}
+
+//! Get the statistics from the hospital that should be displayed.
+//! Selection starts at the last (=newest) entry, and goes back in time.
+//!return The values of all statistics to plot in the graph display.
+function UIGraphs::getHospitalStatistics() {
+  var statistics = this.hospital.statistics;
+
+  var values = {};
+  var i = #statistics; // Picking hospital statistics from right to left (recent to old).
+  var stats_stepsize = getStatisticsStepsize(this.graph_scale);
+  while( #values < VERT_COUNT && i >= 1 ) {
+    values[#values + 1] = statistics[i];
+    i -=   stats_stepsize;
+  }
+  return values;
+}
+
+//! Reposition the given sequence of text entries vertically such that the maximum
+//  absolute deviation from the ideal position is minimized.
+//!param label_datas (array) Text entries
+//!param start_index (int) First entry to move.
+//!param last_index (int) Last entry to move.
+var function moveSequence(label_datas, start_index, last_index) {
+  // min_y, max_y Smallest and biggest vertical position of the labels. Since
+  //    they are sorted on y, it's the position of the first and last visible entry.
+  // min_y_shift, max_y_shift Vertical movement of the label of the first and
+  //    last visible entry for vertically centering the text.
+  // min_dev, max_dev Smallest and biggest deviation from the optimal position,
+  //    for all visible labels.
+  var min_y = null;
+  var max_y, min_y_shift, max_y_shift, min_dev, max_dev;
+  for( i = start_index, last_index ) {
+    var label = label_datas[i];
+    if( label.pos_y ) { // Label is visible
+      var deviation = label.pos_y - label.ideal_y; // Positive if moved down
+      if( min_y ) { // Updating the max y, and deviations
+        max_y = label.pos_y;
+        max_y_shift = label.shift_y;
+        min_dev = math.min(min_dev, deviation);
+        max_dev = math.max(max_dev, deviation);
+      } else { // First time entering the loop
+        min_y = label.pos_y;
+        max_y = label.pos_y;
+        min_y_shift = label.shift_y;
+        max_y_shift = label.shift_y;
+        min_dev = deviation;
+        max_dev = deviation;
+      }
+    }
+  }
+
+  // There should be at least one visible entry in the provided range.
+  assert(min_y != null);
+
+  var move = -math.floor((max_dev + min_dev) / 2); // Suggested movement of the sequence.
+
+  // Verify the sequence will stay inside graph upper and lower limits, adjust otherwise.
+  if( min_y + min_y_shift + move < TOP_Y ) {
+    move = TOP_Y - min_y - min_y_shift;
+  } else if( max_y + max_y_shift + move > BOTTOM_Y ) {
+    move = BOTTOM_Y - max_y - max_y_shift;
+  }
+
+  // And update the positions.
+  for( i = start_index, last_index ) {
+    var label = label_datas[i];
+    if( label.pos_y ) { label.pos_y = label.pos_y + move; }
+  }
+}
+
+//! Compute new actual position of the labels.
+//!param graph (UIGraphs) Graph window object
+var function updateTextPositions(graph) {
+  // Reset vertical position of the text back to its ideal position.
+  // Disable computations on invisible graphs by removing the actual y position of it.
+  for( _, label in ipairs(graph.label_datas) ) {
+    if( graph.hide_graph[label.stat] ) {
+      label.pos_y = null;
+    } else {
+      label.pos_y = label.ideal_y;
+    }
+  }
+
+  // Move labels of the graphs such that they stay at the right of the graph
+  // between their upper and lower boundaries.
+  var sequence_moved = true;
+  var collision_count = 8; // In theory the loop should terminate, but better safe than sorry.
+  while( sequence_moved && collision_count > 0 ) {
+    --collision_count    ;
+    sequence_moved = false;
+
+    // Find sequences of text entries that partly overlap or have no vertical
+    // space between them. Entries in such a sequence cannot be moved
+    // individually, the sequence as a whole must move.
+    var start_index, last_index = null, null; // Start and end of the sequence.
+    var collision = false; // True collision detected in the sequence
+    var prev_index, prev_label = null, null;
+    for( i, label in ipairs(graph.label_datas) ) {
+      if( label.pos_y ) { // Label is visible
+        if( prev_label ) {
+          // Bottom y of previous label, top of current label
+          var bottom_prev = prev_label.pos_y + prev_label.shift_y + prev_label.size_y;
+          var top_current = label.pos_y + label.shift_y;
+
+          if( top_current < bottom_prev ) {
+            // True collision, text has to move
+            collision = true;
+            sequence_moved = true;
+            label.pos_y = bottom_prev - label.shift_y;
+            if( ! start_index ) { start_index = prev_index; }
+            last_index = i;
+
+          } else if( top_current == bottom_prev ) {
+            // Entry is concatenated to the sequence, position is fine.
+            if( ! start_index ) { start_index = prev_index; }
+            last_index = i;
+          } else {
+            // Entry is not part of the sequence, move previous sequence to its
+            // optimal spot if required
+            if( collision ) {
+              moveSequence(graph.label_datas, start_index, last_index);
+            }
+
+            collision = false;
+            start_index = null;
+            last_index = null;
+            // Do not consider the current text in this round. The next entry may
+            // see it as the start of a next sequence.
+          }
+        }
+        prev_label = label;
+        prev_index = i;
+      }
+    }
+
+    if( collision ) {
+      moveSequence(graph.label_datas, start_index, last_index);
+    }
+  }
+}
+
+function UIGraphs::updateLines() {
+  this.values = this->getHospitalStatistics();
+
+  // Construct meta data about each graph line.
+  var graph_datas = {}; // Table ordered by statistics name.
+  this.graph_datas = graph_datas;
+  for( stat, _ in pairs(this.values[1]) ) {
+    graph_datas[stat] = {line = null, maximum = 0, minimum = 0};
+  }
+
+  // Decide maximum and minimum for normalisation of each line.
+  // 0 is always included in the computed range.
+  for( _, stats in ipairs(this.values) ) {
+    for( stat, value in pairs(stats) ) {
+      if( value < graph_datas[stat].minimum ) {
+        graph_datas[stat].minimum = value;
+      }
+      if( value > graph_datas[stat].maximum ) {
+        graph_datas[stat].maximum = value;
+      }
+    }
+  }
+
+  // Add the line objects of the graph.
+  for( stat, graph_data in pairs(this.graph_datas) ) {
+    var line = TH.line();
+    line->setWidth(2);
+    var hue = colours[stat];
+    line->setColour(hue[1], hue[2], hue[3], 255);
+    graph_data.line = line;
+  }
+
+  // Add the graph line pieces. Doing this separately is more efficient as all
+  // graph lines can be extended to the left in the same iteration.
+  var xpos = RIGHT_X;
+  for( i, stats in ipairs(this.values) ) {
+    for( stat, value in pairs(stats) ) {
+      var line = graph_datas[stat].line;
+      var ypos = computeVerticalValuePosition(graph_datas[stat], value);
+      if( i == 1 ) {
+        line->moveTo(xpos, ypos);
+      } else {
+        line->lineTo(xpos, ypos);
+      }
+    }
+    xpos -=   VERT_DX;
+  }
+
+  // Compute label data for each statistic, and order by vertical position.
+  // The newest statistic values are displayed at the right edge of the graph,
+  // which decides the optimal position of the graph label text and value.
+  var label_datas = {};
+  this.label_datas = label_datas;
+
+  for( stat, value in pairs(this.values[1]) ) {
+    var ideal_y = computeVerticalValuePosition(graph_datas[stat], value);
+    var text = _S.graphs[stat] .. ":";
+    var _, size_y, _ = this.black_font->sizeOf(text);
+    label_datas[#label_datas + 1] = {
+        stat = stat, // Name of the statistic it belongs to.
+        text = text, // Translated label text.
+        ideal_y = ideal_y, // Ideal vertical position.
+        pos_y = null, // Actual position for drawing.
+        size_y = size_y, // Vertical size of the text.
+        shift_y = -math.floor(size_y / 2), // Amount of shift to center the text.
+        value = value}; // Numeric value to display.
+  }
+
+  // Sort the labels of the graph on ideal y position, and compute actual position.
+  var function compare(a,b) {
+    return a.ideal_y < b.ideal_y;
+  }
+  table.sort(label_datas, compare);
+  updateTextPositions(this);
+
+  // Create small lines going from the number of month name to the actual graph.
+  // Like the lines, index runs from right to left at the screen.
+  var aux_lines = {};
+  this.aux_lines = aux_lines;
+
+  xpos = RIGHT_X;
+  for( _ = 1, #this.values ) {
+    var line = TH.line();
+    line->setWidth(1);
+    line->moveTo(xpos, BOTTOM_Y + 2);
+    line->lineTo(xpos, BOTTOM_Y + 8);
+    aux_lines[#aux_lines + 1] = line;
+    xpos -=   VERT_DX;
+  }
+}
+
+function UIGraphs::draw(canvas, x, y) {
+  this.background->draw(canvas, this.x + x, this.y + y);
+  UIFullscreen.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+
+  this.white_font->draw(canvas, _S.graphs.money_in, x + 502, y + 41, 80, 27);
+  this.white_font->draw(canvas, _S.graphs.money_out, x + 502, y + 93, 80, 27);
+  this.white_font->draw(canvas, _S.graphs.wages, x + 502, y + 145, 80, 27);
+  this.white_font->draw(canvas, _S.graphs.balance, x + 502, y + 197, 80, 27);
+  this.white_font->draw(canvas, _S.graphs.visitors, x + 502, y + 249, 80, 27);
+  this.white_font->draw(canvas, _S.graphs.cures, x + 502, y + 301, 80, 27);
+  this.white_font->draw(canvas, _S.graphs.deaths, x + 502, y + 353, 80, 27);
+  this.white_font->draw(canvas, _S.graphs.reputation, x + 502, y + 405, 80, 27);
+
+  // Draw the different lines
+  for( stat, graph in pairs(this.graph_datas) ) {
+    if( ! this.hide_graph[stat] ) {
+      graph.line->draw(canvas, x, y);
+    }
+  }
+
+  // Draw strings showing what values each entry has at the moment just to the right of the graph.
+  // TODO: These should be coloured according to the colour of the corresponding line.
+  for( _, label in pairs(this.label_datas) ) {
+    if( label.pos_y ) {
+      var ypos = label.pos_y + label.shift_y;
+      this.black_font->draw(canvas, label.text, x + RIGHT_X + 3, y + ypos);
+      this.black_font->draw(canvas, label.value, x + RIGHT_X + 60, y + ypos);
+    }
+  }
+
+  var stats_stepsize = getStatisticsStepsize(this.graph_scale);
+  var xpos = x + RIGHT_X;
+
+  // Draw numbers (or month names) below the graph
+  assert(#this.hospital.statistics > 0); // Avoid negative months and years.
+  if( stats_stepsize >= 12 ) {
+    // Display years
+    var year_number = math.floor((#this.hospital.statistics - 1) / 12);
+    for( i = 1, #this.values ) {
+      this.black_font->drawWrapped(canvas, year_number, xpos, y + BOTTOM_Y + 10, 25, "center");
+      xpos -=   VERT_DX;
+      year_number = year_number - math.floor(stats_stepsize / 12);
+
+      // And the small black line
+      this.aux_lines[i]->draw(canvas, x, y);
+    }
+  } else {
+    // Display months
+    var month_number = #this.hospital.statistics - math.floor((#this.hospital.statistics - 1) / 12) * 12;
+    for( i = 1, #this.values ) {
+      this.black_font->drawWrapped(canvas, _S.months[month_number], xpos, y + BOTTOM_Y + 10, 25, "center");
+      xpos -=   VERT_DX;
+      month_number -=   stats_stepsize;
+      if( month_number < 1 ) { month_number +=   12; }
+
+      // And the small black line
+      this.aux_lines[i]->draw(canvas, x, y);
+    }
+  }
+}
+
+function UIGraphs::toggleGraphScale() {
+  this.graph_scale = this.graph_scale + 1;
+  if( this.graph_scale == 4 ) { this.graph_scale = 1; }
+  this->updateLines();
+  this.ui->playSound("selectx.wav");
+}
+
+function UIGraphs::toggleGraph(name) {
+  this.hide_graph[name] = ! this.hide_graph[name];
+  this.ui->playSound("selectx.wav");
+  updateTextPositions(this);
+}
+
+function UIGraphs::close() {
+  UIFullscreen.close(this);
+  this.ui->getWindow(UIBottomPanel)->updateButtonStates();
+}
+
+function UIGraphs::afterLoad(old, new) {
+  if( old < 117 ) {
+    this->close();
+  }
+}

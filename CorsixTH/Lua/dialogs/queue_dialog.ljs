@@ -1,0 +1,387 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var TH = require("TH");
+
+//! Room / door / reception desk queue visualisation dialog.
+class ("UIQueue") (Window);
+
+//-@type UIQueue
+var UIQueue = _G["UIQueue"];
+
+function UIQueue::UIQueue(ui, queue) {
+  this->Window();
+
+  var app = ui.app;
+  this.esc_closes = true;
+  this.ui = ui;
+  this.modal_class = "main";
+  this.width = 604;
+  this.height = 122;
+  this->setDefaultPosition(0.5, 0.5);
+  this.panel_sprites = app.gfx->loadSpriteTable("QData", "Req06V", true);
+  this.white_font = app.gfx->loadFont("QData", "Font01V");
+
+  this.queue = queue;
+
+  this->addPanel(364,  0,  0); // Right extremity of the panel
+  for( x = 21, 83, 4 ) {
+    this->addPanel(365,  x, 0);
+  }
+  this->addPanel(366,  85, 0);
+  for( x = 223, 531, 7 ) {
+    this->addPanel(367, x, 0);
+  }
+  this->addPanel(368, 529, 0);  // Left extremity of the panel
+  this->addPanel(369, 97,  this.height - 33)->makeButton(0, 0, 17, 17, 370, this.decreaseMaxSize)->setTooltip(_S.tooltip.queue_window.dec_queue_size);
+  this->addPanel(371, 144, this.height - 33)->makeButton(0, 0, 17, 17, 372, this.increaseMaxSize)->setTooltip(_S.tooltip.queue_window.inc_queue_size);
+  this->addPanel(373, this.width - 42, 17)->makeButton(0, 0, 24, 24, 374, this.close)->setTooltip(_S.tooltip.queue_window.close);
+
+  this->makeTooltip(_S.tooltip.queue_window.num_in_queue, 15, 15, 163, 36);
+  this->makeTooltip(_S.tooltip.queue_window.num_expected, 15, 39, 163, 60);
+  this->makeTooltip(_S.tooltip.queue_window.num_entered,  15, 62, 163, 83);
+  this->makeTooltip(_S.tooltip.queue_window.max_queue_size, 15, 87, 163, 108);
+
+  this->makeTooltip(_S.tooltip.queue_window.front_of_queue, 168, 25, 213, 105);
+  this->makeTooltip(_S.tooltip.queue_window.end_of_queue, 543, 51, 586, 105);
+  this->makeTooltip(_S.tooltip.queue_window.patient .. " " .. _S.misc.not_yet_implemented, 218, 15, 537, 107);
+}
+
+function UIQueue::decreaseMaxSize() {
+  var amount = 1;
+  if( this.ui.app.key_modifiers.ctrl ) {
+    amount *=   10;
+  } else if( this.ui.app.key_modifiers.shift ) {
+    amount *=   5;
+  }
+  this.queue->decreaseMaxSize(amount);
+}
+
+function UIQueue::increaseMaxSize() {
+  var amount = 1;
+  if( this.ui.app.key_modifiers.ctrl ) {
+    amount *=   10;
+  } else if( this.ui.app.key_modifiers.shift ) {
+    amount *=   5;
+  }
+  this.queue->increaseMaxSize(amount);
+}
+
+function UIQueue::draw(canvas, x, y) {
+  Window.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+
+  var font = this.white_font;
+  var queue = this.queue;
+  var num_patients = queue->reportedSize();
+
+  font->draw(canvas, _S.queue_window.num_in_queue, x + 22, y + 22);
+  font->draw(canvas, num_patients, x + 140, y + 22);
+
+  font->draw(canvas, _S.queue_window.num_expected, x + 22, y + 45);
+  font->draw(canvas, queue->expectedSize(), x + 140, y + 45);
+
+  font->draw(canvas, _S.queue_window.num_entered, x + 22, y + 68);
+  font->draw(canvas, queue.visitor_count, x + 140, y + 68);
+
+  font->draw(canvas, _S.queue_window.max_queue_size, x + 22, y + 93);
+  font->draw(canvas, queue.max_size, x + 119, y + 93);
+
+  this->drawPatients(canvas, x, y);
+
+  // Draw dragged patient in the cursor location
+  if( this.dragged ) {
+    this->drawPatient(canvas, this.dragged.x, this.dragged.y, this.dragged.patient);
+  }
+}
+
+var function isInsideQueueBoundingBox(x, y) {
+  var x_min = 219;
+  var x_max = 534;
+  var y_min = 15;
+  var y_max = 105;
+  return ! (x < x_min || x > x_max || y < y_min || y > y_max);
+}
+
+function UIQueue::onMouseDown(button, x, y) {
+  // Allow normal window operations if the mouse is outside the listing of patients
+  if( ! isInsideQueueBoundingBox(x, y) ) {
+    return Window.onMouseDown(this, button, x, y);
+  }
+  var x_min = 219;
+  var y_min = 15;
+  this.hovered = this->getHoveredPatient(x - x_min, y - y_min);
+  // Select patient to drag - if left clicking.
+  if( button == "left" ) {
+    this.dragged = this.hovered;
+    if( this.dragged ) {
+      this.dragged.x = x + this.x;
+      this.dragged.y = y + this.y;
+    }
+  } else if( button == "right" && this.hovered ) {
+    // Otherwise bring up the choice screen.
+    this.just_added = true;
+    this.ui->addWindow(UIQueuePopup(this.ui, this.x + x, this.y + y, this.hovered.patient));
+  }
+}
+
+function UIQueue::onMouseUp(button, x, y) {
+  if( this.just_added ) {
+    this.just_added = false;
+  } else {
+    // Always remove any leftover popup windows
+    var window = this.ui->getWindow(UIQueuePopup);
+    if( window ) {
+      window->close();
+    }
+  }
+  if( button == "left" ) {
+    var queue = this.queue;
+    var num_patients = queue->reportedSize();
+    var width = 276;
+    this.ui->setCursor(this.ui.default_cursor); // reset cursor
+
+    if( ! this.dragged ) {
+      return Window.onMouseUp(this, button, x, y);
+    }
+
+    // Check whether the dragged patient is still in the queue
+    var index = -1;
+    for( i = 1, num_patients ) {
+      if( this.dragged.patient == queue->reportedHumanoid(i) ) {
+        index = i;
+        break;
+      }
+    }
+
+    if( index == -1 ) {
+      this.dragged = null;
+      return;
+    }
+
+    if( x > 170 && x < 210 && y > 25 && y < 105 ) { // Inside door bounding box
+      queue->move(index, 1); // move to front
+    } else if( x > 542 && x < 585 && y > 50 && y < 105 ) { // Inside exit sign bounding box
+      queue->move(index, num_patients); // move to back
+    } else if( isInsideQueueBoundingBox(x, y) ) {
+      var dx = 1;
+      if( num_patients != 1 ) {
+        dx = math.floor(width / (num_patients - 1));
+      }
+      queue->move(index, math.floor((x - 220) / dx) + 1); // move to dropped position
+      this->onMouseMove(x, y, 0, 0);
+    }
+
+    // Try to drop to another room
+    var room;
+    var wx, wy = this.ui->ScreenToWorld(x + this.x, y + this.y);
+    wx = math.floor(wx);
+    wy = math.floor(wy);
+    if( wx > 0 && wy > 0 && wx < this.ui.app.map.width && wy < this.ui.app.map.height ) {
+      room = this.ui.app.world->getRoom(wx, wy);
+    }
+
+    // The new room must be of the same class as the current one
+    var this_room = this.dragged.patient.next_room_to_visit;
+    if( this_room && room && room != this_room && room.room_info.id == this_room.room_info.id ) {
+      // Move to another room
+      var patient = this.dragged.patient;
+      patient->setNextAction(room->createEnterAction(patient));
+      patient.next_room_to_visit = room;
+      patient->updateDynamicInfo(_S.dynamic_info.patient.actions.on_my_way_to->format(room.room_info.name));
+      room.door.queue->expect(patient);
+      room.door->updateDynamicInfo();
+    }
+  }
+  this.dragged = null;
+}
+
+function UIQueue::onMouseMove(x, y, dx, dy) {
+  var x_min = 219;
+  var y_min = 15;
+  if( this.dragged ) {
+    this.dragged.x = x + this.x;
+    this.dragged.y = y + this.y;
+
+    // Change cursor when outside queue dialog
+    if( x > 0 && x < 605 && y > 0 && y < 120 ) {
+      this.ui->setCursor(this.ui.default_cursor);
+    } else {
+      this.ui->setCursor(this.ui.app.gfx->loadMainCursor("queue_drag"));
+    }
+  }
+  if( ! isInsideQueueBoundingBox(x, y) ) {
+    this.hovered = null;
+    Window->onMouseMove(x, y, dx, dy);
+    return;
+  }
+
+  // Update hovered patient
+  this.hovered = this->getHoveredPatient(x - x_min, y - y_min);
+  Window->onMouseMove(x, y, dx, dy);
+}
+
+function UIQueue::close() {
+  // Always remove any leftover popup windows
+  var window = this.ui->getWindow(UIQueuePopup);
+  if( window ) {
+    window->close();
+  }
+  Window.close(this);
+}
+
+function UIQueue::getHoveredPatient(x, y) {
+  var queue = this.queue;
+  var num_patients = queue->reportedSize();
+  var width = 276;
+  var gap = 10;
+  x = x - 15; // sprite offset
+
+  var dx = 0;
+  if( num_patients != 1 ) {
+    dx = math.floor(width / (num_patients - 1));
+  }
+
+  var offset = 0;
+  var closest = null;
+
+  // Find the closest patient to the given x-coordinate
+  for( index = 1, num_patients ) {
+    var patient = queue->reportedHumanoid(index);
+    var patient_x = (index - 1) * dx + offset;
+    var diff = math.abs(patient_x - x);
+
+    // Take into account the gap between the hovered patient and other patients
+    if( this.hovered && patient == this.hovered.patient ) {
+      offset = gap * 2;
+      diff +=   gap;
+    }
+
+    if( ! closest || diff < closest.diff ) {
+      closest = {patient = patient, diff = diff, x = x};
+    }
+  }
+
+  // The closest patient must be close enough (i.e. almost over the patient sprite)
+  if( ! closest || closest.diff > 25 ) {
+    return null;
+  }
+
+  return {patient = closest.patient, x = closest.x};
+}
+
+function UIQueue::drawPatients(canvas, x, y) {
+  var queue = this.queue;
+  var num_patients = queue->reportedSize();
+  var width = 276;
+  var gap = 10;
+  var dx = 0;
+
+  if( ! this.hovered ) {
+    if( num_patients != 1 ) {
+      dx = math.floor(width / (num_patients - 1));
+    }
+
+    for( index = 1, num_patients ) {
+      var patient = queue->reportedHumanoid(index);
+      this->drawPatient(canvas, x + 239 + dx * (index - 1), y + 75, patient);
+    }
+  } else {
+    if( num_patients != 1 ) {
+      dx = math.floor((width - 2 * gap) / (num_patients - 1));
+    }
+
+    x +=   239;
+    y +=   75;
+    for( index = 1, num_patients ) {
+      var patient = queue->reportedHumanoid(index);
+      if( patient == this.hovered.patient ) {
+        x +=   gap;
+        this->drawPatient(canvas, x, y - 10, patient);
+        x = x + gap + dx;
+      } else {
+        this->drawPatient(canvas, x, y, patient);
+        x +=   dx;
+      }
+    }
+  }
+}
+
+function UIQueue::drawPatient(canvas, x, y, patient) {
+  var anim = TH.animation();
+  var idle_anim = patient.getIdleAnimation(patient.humanoid_class);
+  anim->setAnimation(this.ui.app.world.anims, idle_anim, 1); // flag 1 is for having patients in west position (looking the door in the dialog)
+  for( layer, id in pairs(patient.layers) ) {
+    anim->setLayer(layer, id);
+  }
+  anim->draw(canvas, x, y);
+  // Also draw the mood of the patient, if any.
+  var mood = patient->getCurrentMood();
+  if( mood ) {
+    mood->draw(canvas, x, y + 24);
+  }
+}
+
+class ("UIQueuePopup") (Window);
+
+//-@type UIQueuePopup
+var UIQueuePopup = _G["UIQueuePopup"];
+
+function UIQueuePopup::UIQueuePopup(ui, x, y, patient) {
+  this->Window();
+  this.esc_closes = true;
+  this.ui = ui;
+  this.patient = patient;
+  this.width = 188;
+  this.height = 68;
+  var app = ui.app;
+  this.modal_class = "popup";
+  this->setDefaultPosition(x, y);
+
+  // Background sprites
+  this->addPanel(375, 0, 0);
+
+  // Buttons
+  this->addPanel(0, 12, 12)->makeButton(0, 0, 81, 54, 378, this.sendToReception);
+  this->addPanel(0, 95, 12)->makeButton(0, 0, 81, 54, 379, this.sendHome);
+  this->addPanel(377, 0, 58);
+
+  this.panel_sprites = app.gfx->loadSpriteTable("QData", "Req06V", true);
+  this.white_font = app.gfx->loadFont("QData", "Font01V");
+}
+
+function UIQueuePopup::draw(canvas, x, y) {
+  Window.draw(this, canvas, x, y);
+  // TODO: Same as above.
+  // x, y = self.x + x, self.y + y
+  /*for i, hospital in ipairs(self.ui.app.world.hospitals) do
+    self.white_font:draw(canvas, hospital.name:upper() , x + 74, y + 78 + (i-1)*34, 92, 0)
+  end*/
+}
+
+function UIQueuePopup::sendToReception() {
+  this.patient->setNextAction(SeekReceptionAction());
+  this->close();
+}
+
+function UIQueuePopup::sendHome() {
+  this.patient->goHome("kicked");
+  this->close();
+}

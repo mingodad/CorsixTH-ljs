@@ -1,0 +1,278 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("UIHireStaff") (Window);
+
+//-@type UIHireStaff
+var UIHireStaff = _G["UIHireStaff"];
+
+function UIHireStaff::UIHireStaff(ui) {
+  this->Window();
+  this.modal_class = "main";
+  this.esc_closes = true;
+  this.world = ui.app.world;
+  this.ui = ui;
+  this.width = 242;
+  this.height = 323;
+  this->setDefaultPosition(100, 100);
+  this.panel_sprites = ui.app.gfx->loadSpriteTable("QData", "Req11V", true);
+  this.white_font = ui.app.gfx->loadFont("QData", "Font01V");
+  this.face_parts = ui.app.gfx->loadRaw("Face01V", 65, 1350, null, "Data", "MPalette.dat");
+  this->addKeyHandler("return", this.hire);
+  this->addKeyHandler("keypad enter", this.hire);
+
+  // Left hand side tab backgrounds
+  this->addPanel(253, 0,   0);
+  this->addPanel(254, 0,  83);
+  this->addPanel(254, 0, 162);
+  this->addPanel(255, 0, 241);
+
+  // Left hand side tabs
+  var /*persistable:hire_staff_category*/ function category(name, state, btn) {
+    if( #this.world.available_staff[name] == 0 ) {
+      this.ui->playSound("wrong2.wav");
+      if( state ) {
+        btn->toggle();
+      }
+    } else {
+      this.ui->playSound("selectx.wav");
+      this->setCategory(state && name || null);
+    }
+  }
+  this.tabs = {
+    this->addPanel(264, 8,   8)->makeToggleButton(0, 0, 40, 69, 265, category, "Doctor")->setTooltip(_S.tooltip.hire_staff_window.doctors),
+    this->addPanel(266, 8,  87)->makeToggleButton(0, 0, 40, 69, 267, category, "Nurse")->setTooltip(_S.tooltip.hire_staff_window.nurses),
+    this->addPanel(268, 8, 166)->makeToggleButton(0, 0, 40, 69, 269, category, "Handyman")->setTooltip(_S.tooltip.hire_staff_window.handymen),
+    this->addPanel(270, 8, 245)->makeToggleButton(0, 0, 40, 69, 271, category, "Receptionist")->setTooltip(_S.tooltip.hire_staff_window.receptionists),
+  };
+
+  // Right hand side
+  this->addPanel(256,  56,   0); // Dialog header
+  for( y = 49, 113, 11 ) {
+    this->addPanel(257,56,   y); // Dialog background
+  }
+  this.ability_bg_panel =
+  this->addPanel(260,  55, 114); // Abilities background
+  this.skill_bg_panel =
+  this->addPanel(259,  68,  95)->setTooltip(_S.tooltip.hire_staff_window.staff_ability, 109, 95); // Skill background
+  this.skill_bg_panel.visible = false;
+  this->addPanel(261,  55, 160); // Wage background
+  this.abilities_blanker =
+  this->addColourPanel(73, 133, 156, 34, 60, 174, 203); // Hides abilities list
+  for( y = 207, 262, 3 ) {
+    this->addPanel(262, 54,  y); // Description background
+  }
+  this->addColourPanel(155, 45, 72, 81, 211, 255, 255); // Portrait background
+  this->addPanel(263,  56, 263); // Dialog midpiece
+  this.complete_blanker =
+  this->addColourPanel(68, 15, 161, 257, 60, 174, 203); // Hides all staff info
+  this->addPanel(272,  56, 277)->makeButton(8, 10, 43, 27, 273, this.movePrevious)->setTooltip(_S.tooltip.hire_staff_window.prev_person);
+  this->addPanel(274, 106, 277)->makeButton(0, 10, 58, 27, 275, this.hire)->setTooltip(_S.tooltip.hire_staff_window.hire);
+  this->addPanel(276, 163, 277)->makeButton(0, 10, 28, 27, 277, this.close)->setTooltip(_S.tooltip.hire_staff_window.cancel);
+  this->addPanel(278, 190, 277)->makeButton(0, 10, 44, 27, 279, this.moveNext)->setTooltip(_S.tooltip.hire_staff_window.next_person);
+
+  this->makeTooltip(_S.tooltip.hire_staff_window.salary, 68, 173, 227, 194);
+  this->makeTooltip(_S.tooltip.hire_staff_window.doctor_seniority, 68, 44, 151, 95);
+  this->makeTooltip(_S.tooltip.hire_staff_window.qualifications, 68, 134, 107, 167);
+
+  this->makeTooltip(_S.tooltip.hire_staff_window.surgeon, 120, 136, 137, 167);
+  this->makeTooltip(_S.tooltip.hire_staff_window.psychiatrist, 137, 136, 164, 167);
+  this->makeTooltip(_S.tooltip.hire_staff_window.researcher, 164, 136, 191, 167);
+
+  this->updateTooltips();
+}
+
+function UIHireStaff::updateTooltips() {
+  var cond = ! ! this.category;
+  this.tooltip_regions[1].enabled = cond;
+
+  cond = cond && this.category == "Doctor";
+  this.tooltip_regions[2].enabled = cond;
+  this.tooltip_regions[3].enabled = cond;
+  cond = cond && this.current_index && this.world.available_staff[this.category];
+  cond = cond && cond[this.current_index];
+  this.tooltip_regions[4].enabled = cond && cond.is_surgeon >= 1.0;
+  this.tooltip_regions[5].enabled = cond && cond.is_psychiatrist >= 1.0;
+  this.tooltip_regions[6].enabled = cond && cond.is_researcher >= 1.0;
+}
+
+function UIHireStaff::onMouseUp(button, x, y) {
+  this.mouse_up_x = this.x + x;
+  this.mouse_up_y = this.y + y;
+  return Window.onMouseUp(this, button, x, y);
+}
+
+function UIHireStaff::hire() {
+  this.ui->tutorialStep(2, {3, 4, 5}, 6);
+  this.ui->tutorialStep(4, 3, 4);
+  var profile;
+  if( this.category && this.current_index ) {
+    profile = this.world.available_staff[this.category];
+    profile = profile && profile[this.current_index];
+  }
+  if( ! profile ) {
+    this.ui->playSound("wrong2.wav");
+    return;
+  }
+  if( this.ui.hospital.balance < profile.wage ) {
+    this->cannotAfford();
+    this.ui->playSound("wrong2.wav");
+    return;
+  }
+  this.ui->playSound("YesX.wav");
+  table.remove(this.world.available_staff[this.category], this.current_index);
+  this.ui->addWindow(UIPlaceStaff(this.ui, profile, this.mouse_up_x, this.mouse_up_y));
+}
+function UIHireStaff::cannotAfford() {
+  var msg = {
+    (_A.warnings.cannot_afford),
+    (_A.warnings.cash_low_consider_loan),
+  };
+  if( msg ) {
+    this.world.ui.adviser->say(msg[math.random(1, #msg)]);
+  }
+}
+function UIHireStaff::draw(canvas, x, y) {
+  Window.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+
+  var font = this.white_font;
+  var staff = this.world.available_staff;
+  font->draw(canvas, #staff.Doctor      , x + 16, y +  58, 26, 0);
+  font->draw(canvas, #staff.Nurse       , x + 16, y + 137, 26, 0);
+  font->draw(canvas, #staff.Handyman    , x + 16, y + 216, 26, 0);
+  font->draw(canvas, #staff.Receptionist, x + 16, y + 295, 26, 0);
+  if( this.category && this.current_index ) {
+    var profile = staff[this.category];
+    profile = profile && profile[this.current_index];
+    if( ! profile ) {
+      return;
+    }
+    font->draw(canvas, profile.name, x + 79, y + 21);
+    profile->drawFace(canvas, x + 158, y + 48, this.face_parts);
+    font->draw(canvas, "$" .. profile.wage, x + 116, y + 179);
+    font->drawWrapped(canvas, profile.desc, x + 74, y + 205, 149);
+    // Skill bar
+    if( this.skill_bg_panel.visible ) {
+      var skill_bar_width = math.floor(profile.skill * 40 + 0.5);
+      if( skill_bar_width != 0 ) {
+        var px, py = this.skill_bg_panel.x, this.skill_bg_panel.y;
+        px +=   x;
+        py +=   y;
+        for( dx = 0, skill_bar_width - 1 ) {
+          this.panel_sprites->draw(canvas, 3, px + 22 + dx, py + 9);
+        }
+      }
+    }
+    if( this.category == "Doctor" ) {
+      // Junior / Doctor / Consultant marker
+      this.panel_sprites->draw(canvas, 258, x + 71, y + 49);
+      if( profile.is_junior ) {
+        this.panel_sprites->draw(canvas, 296, x +  79, y + 80);
+      } else if( profile.is_consultant ) {
+        this.panel_sprites->draw(canvas, 296, x + 131, y + 80);
+      } else {
+        this.panel_sprites->draw(canvas, 296, x + 101, y + 80);
+      }
+      // Ability markers
+      var px, py = this.ability_bg_panel.x, this.ability_bg_panel.y;
+      px +=   x;
+      py +=   y;
+      if( profile.is_surgeon >= 1.0 ) {
+        this.panel_sprites->draw(canvas, 292, px +  65, py + 22);
+      }
+      if( profile.is_psychiatrist >= 1.0 ) {
+        this.panel_sprites->draw(canvas, 293, px +  82, py + 28);
+      }
+      if( profile.is_researcher >= 1.0 ) {
+        this.panel_sprites->draw(canvas, 294, px + 109, py + 27);
+      }
+    }
+  }
+}
+
+function UIHireStaff::movePrevious() {
+  this->moveBy(-1);
+  this.ui->tutorialStep(2, 4, 5);
+}
+
+function UIHireStaff::moveNext() {
+  this.ui->tutorialStep(2, 3, 4);
+  this->moveBy(1);
+}
+
+function UIHireStaff::moveBy(n) {
+  if( this.category ) {
+    this.current_index = this.current_index + n;
+    var category = this.world.available_staff[this.category];
+    if( this.current_index < 1 ) {
+      this.current_index = 1;
+    } else if( this.current_index > #category ) {
+      this.current_index = #category;
+    } else {
+      this.ui->playSound("selectx.wav");
+      this->updateTooltips();
+      return true;
+    }
+  }
+  this.ui->playSound("wrong2.wav");
+  return false;
+}
+
+function UIHireStaff::setCategory(name) {
+  if( name == "Receptionist" ) {
+    this.ui->tutorialStep(2, 2, 3);
+  } else {
+    this.ui->tutorialStep(2, {3, 4, 5}, 2);
+  }
+  if( name == "Doctor" ) {
+    this.ui->tutorialStep(4, 2, 3);
+  } else {
+    this.ui->tutorialStep(4, 3, 2);
+  }
+  this.skill_bg_panel.visible = ! ! name;
+  this.complete_blanker.visible = ! name;
+  this.abilities_blanker.visible = name != "Doctor";
+  this.category = name;
+  for( _, btn in ipairs(this.tabs) ) {
+    var should_be_toggled = btn.on_click_self == name;
+    if( btn.toggled != should_be_toggled ) {
+      btn->toggle();
+    }
+  }
+  this.current_index = 1;
+  this->updateTooltips();
+}
+
+function UIHireStaff::close() {
+  this.ui->tutorialStep(2, {2, 3, 4, 5}, 1);
+  this.ui->tutorialStep(4, {2, 3}, 1);
+  return Window.close(this);
+}
+
+function UIHireStaff::afterLoad(old, new) {
+  if( old < 101 ) {
+    this->removeKeyHandler("enter");
+    this->addKeyHandler("return", this.hire);
+  }
+  if( old < 104 ) {
+    this->addKeyHandler("keypad enter", this.hire);
+  }
+}

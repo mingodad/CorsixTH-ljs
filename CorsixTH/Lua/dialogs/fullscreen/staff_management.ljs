@@ -1,0 +1,565 @@
+/* Copyright (c) 2009 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var math_floor = math.floor;
+
+//! Staff management screen
+class ("UIStaffManagement") (UIFullscreen);
+
+//-@type UIStaffManagement
+var UIStaffManagement = _G["UIStaffManagement"];
+
+function UIStaffManagement::UIStaffManagement(ui) {
+  this->UIFullscreen(ui);
+  var gfx = ui.app.gfx;
+  if( ! pcall(function() {
+    this.background = gfx->loadRaw("Staff01V", 640, 480);
+    var palette = gfx->loadPalette("QData", "Staff01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    this.panel_sprites = gfx->loadSpriteTable("QData", "Staff02V", true, palette);
+    this.title_font = gfx->loadFont("QData", "Font01V", false, palette);
+    this.face_parts = ui.app.gfx->loadRaw("Face01V", 65, 1350, null, "Data", "MPalette.dat");
+  }) ) {
+    ui->addWindow(UIInformation(ui, {_S.errors.dialog_missing_graphics}));
+    this->close();
+    return;
+  }
+
+  var hosp = ui.hospital;
+  this.ui = ui;
+  this.hospital = hosp;
+
+  // Order the staff
+  this->updateStaffList();
+
+  this.default_button_sound = "selectx.wav";
+
+  // Close button
+  this->addPanel(0, 603, 443)->makeButton(0, 0, 26, 26, 10, this.close)->setTooltip(_S.tooltip.staff_list.close);
+
+  // Top categories
+  var /*persistable:staff_management_category*/ function category(name, state, btn) {
+    this->setCategory(name);
+  }
+  this.categories = {
+    this->addPanel(0, 53, 15)->makeToggleButton(0, 0, 58, 58, 1, category, "Doctor")->setTooltip(_S.tooltip.staff_list.doctors),
+    this->addPanel(0, 119, 15)->makeToggleButton(0, 0, 58, 58, 1, category, "Nurse")->setTooltip(_S.tooltip.staff_list.nurses),
+    this->addPanel(0, 185, 15)->makeToggleButton(0, 0, 58, 58, 1, category, "Handyman")->setTooltip(_S.tooltip.staff_list.handymen),
+    this->addPanel(0, 251, 15)->makeToggleButton(0, 0, 58, 58, 1, category, "Receptionist")->setTooltip(_S.tooltip.staff_list.receptionists),
+  };
+  // Other buttons
+  this->addPanel(0, 12, 86)->makeButton(0, 0, 31, 74, 2, this.scrollUp)->setTooltip(_S.tooltip.staff_list.prev_person);
+  this->addPanel(0, 12, 274)->makeButton(0, 0, 31, 74, 3, this.scrollDown)->setTooltip(_S.tooltip.staff_list.next_person);
+  this->addPanel(0, 319, 372)->makeButton(0, 0, 112, 39, 7, this.payBonus)->setTooltip(_S.tooltip.staff_list.bonus);
+  this->addPanel(0, 319, 418)->makeButton(0, 0, 112, 39, 8, this.increaseSalary)->setTooltip(_S.tooltip.staff_list.pay_rise);
+  this->addPanel(0, 438, 372)->makeButton(0, 0, 45, 85, 9, this.fire)->setTooltip(_S.tooltip.staff_list.sack);
+
+  // "Arrow" to show title of doctors
+  this.arrow = this->addPanel(12, 259, 397);
+  this.arrow_position = 259;
+  this.arrow.visible = false;
+
+  // Scroll bar dot
+  this.scroll_dot = this->addPanel(11, 21, 168);
+  this.scroll_dot.visible = false;
+
+  // Doctors' skills or progress towards them
+  this.progress_surgeon = this->addPanel(17, 188, 408);
+  this.progress_surgeon.visible = false;
+  this.qualified_surgeon = this->addPanel(20, 188, 408)->setTooltip(_S.tooltip.staff_list.surgeon);
+  this.qualified_surgeon.visible = false;
+  this.progress_psychiatrist = this->addPanel(18, 228, 408);
+  this.progress_psychiatrist.visible = false;
+  this.qualified_psychiatrist = this->addPanel(21, 228, 408)->setTooltip(_S.tooltip.staff_list.psychiatrist);
+  this.qualified_psychiatrist.visible = false;
+  this.progress_researcher = this->addPanel(19, 268, 408);
+  this.progress_researcher.visible = false;
+  this.qualified_researcher = this->addPanel(22, 268, 408)->setTooltip(_S.tooltip.staff_list.researcher);
+  this.qualified_researcher.visible = false;
+
+  // Blankers for each row
+  var row_blankers = {};
+  for( i = 1, 10 ) {
+    row_blankers[i] = this->addColourPanel(50, 55 + i*27, 580, 27, 60, 174, 203);
+  }
+  this.row_blankers = row_blankers;
+
+  // Extra background for the portrait
+  this.portrait_back = this->addColourPanel(65, 374, 71, 81, 210, 255, 255);
+  this.portrait_back.visible = false;
+
+  // Doctor skill blankers
+  this.title_blanker = this->addColourPanel(225, 365, 90, 39, 57, 166, 198);
+  this.skill_blanker = this->addColourPanel(142, 406, 168, 54, 57, 166, 198);
+
+  // Tooltip regions
+  this->makeTooltip(_S.tooltip.staff_list.happiness,  321, 51, 421, 75);
+  this->makeTooltip(_S.tooltip.staff_list.tiredness,  426, 51, 526, 75);
+  this->makeTooltip(_S.tooltip.staff_list.ability,    530, 51, 629, 75);
+  this->makeTooltip(_S.tooltip.staff_list.detail,     146, 367, 226, 407);
+  this->makeTooltip(_S.tooltip.staff_list.view_staff, 495, 371, 583, 458);
+
+  this.row_tooltips = {};
+  for( line_num = 1, 10 ) {
+    this.row_tooltips[line_num] = {
+      this->makeTooltip(_S.tooltip.staff_list.salary,      193, 84 + 27 * (line_num - 1), 313, 108 + 27 * (line_num - 1)),
+      this->makeTooltip(_S.tooltip.staff_list.happiness_2, 321, 84 + 27 * (line_num - 1), 421, 108 + 27 * (line_num - 1)),
+      this->makeTooltip(_S.tooltip.staff_list.tiredness_2, 425, 84 + 27 * (line_num - 1), 525, 108 + 27 * (line_num - 1)),
+      this->makeTooltip(_S.tooltip.staff_list.ability_2,   529, 84 + 27 * (line_num - 1), 628, 108 + 27 * (line_num - 1)),
+    };
+  }
+
+  this.seniority_tooltip =
+    this->makeTooltip(_S.tooltip.staff_list.doctor_seniority, 230, 367, 310, 407);
+  this.skills_tooltip =
+    this->makeTooltip(_S.tooltip.staff_list.skills, 146, 406, 186, 460);
+
+  this->setCategory("Doctor");
+
+  // Hotkeys.
+  this->addKeyHandler("left", this.previousCategory);
+  this->addKeyHandler("right", this.nextCategory);
+  this->addKeyHandler("up", this.previousStaff);
+  this->addKeyHandler("down", this.nextStaff);
+}
+
+function UIStaffManagement::updateTooltips() {
+  this.seniority_tooltip.enabled = this.category == "Doctor";
+  this.skills_tooltip.enabled = this.category == "Doctor";
+
+  for( i, tooltips in ipairs(this.row_tooltips) ) {
+    var state = 10 * (this.page - 1) + i <= #this.staff_members[this.category];
+    for( _, tooltip in ipairs(tooltips) ) {
+      tooltip.enabled = state;
+    }
+  }
+}
+
+function UIStaffManagement::updateStaffList(staff_member_removed) {
+  var selected_staff;
+  if( staff_member_removed ) {
+    // The update was issued because someone was removed from the list, we need to handle this.
+    selected_staff = this.staff_members[this.category][this.selected_staff];
+    if( this.staff_members[this.category][this.selected_staff] == staff_member_removed ) {
+      this.selected_staff = null;
+      selected_staff = null;
+    }
+  }
+
+  var hosp = this.hospital;
+  var staff_members = {
+    Doctor = {},
+    Nurse = {},
+    Handyman = {},
+    Receptionist = {},
+  };
+  staff_members.Surgeon = staff_members.Doctor;
+  for( _, staff in ipairs(hosp.staff) ) {
+    var list = staff_members[staff.humanoid_class];
+    list[#list + 1] = staff;
+    // The selected staff might have been moved because someone else was removed from the list.
+    if( selected_staff == staff ) {
+      this.selected_staff = #list;
+    }
+  }
+  this.staff_members = staff_members;
+  if( staff_member_removed ) {
+    this->updateTooltips();
+    // If we're viewing a page that no longer exists, go back a page
+    if( this.page > math.ceil(#this.staff_members[this.category] / 10) ) {
+      this->scrollUp();
+    }
+    this->updateScrollDotVisibility();
+  }
+}
+
+function UIStaffManagement::setCategory(name) {
+
+  this.skill_blanker.visible = name != "Doctor";
+  this.title_blanker.visible = name != "Doctor";
+  this.category = name;
+  for( _, btn in ipairs(this.categories) ) {
+    var should_be_toggled = btn.on_click_self == name;
+    if( btn.toggled != should_be_toggled ) {
+      btn->toggle();
+    }
+  }
+  this.selected_staff = null;
+  this.page = 1;
+  this->updateScrollDotVisibility();
+
+  this->updateTooltips();
+}
+
+// Function to select given list index in the current category.
+// Includes jumping to correct page.
+function UIStaffManagement::selectIndex(idx) {
+  if( idx > #this.staff_members[this.category] || idx <= 0 ) {
+    return;
+  }
+  this.page = math.floor((idx - 1) / 10) + 1;
+  this.selected_staff = idx;
+}
+
+// Function to select a given staff member.
+// Includes switching to correct category and page.
+function UIStaffManagement::selectStaff(staff) {
+  this->setCategory(staff.humanoid_class == "Surgeon" && "Doctor" || staff.humanoid_class);
+  for( i, s in ipairs(this.staff_members[this.category]) ) {
+    if( s == staff ) {
+      this->selectIndex(i);
+      break;
+    }
+  }
+}
+
+function UIStaffManagement::draw(canvas, x, y) {
+  this.background->draw(canvas, this.x + x, this.y + y);
+  UIFullscreen.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+  var titles = this.title_font;
+
+  // Titles
+  titles->draw(canvas, _S.staff_list.morale,      x + 323, y + 31, 95, 0);
+  titles->draw(canvas, _S.staff_list.tiredness,   x + 427, y + 31, 95, 0);
+  titles->draw(canvas, _S.staff_list.skill,       x + 530, y + 31, 95, 0);
+
+  // Number of employees
+  titles->draw(canvas, #this.staff_members["Doctor"], x + 79, y + 57);
+  titles->draw(canvas, #this.staff_members["Nurse"], x + 145, y + 57);
+  titles->draw(canvas, #this.staff_members["Handyman"], x + 211, y + 57);
+  titles->draw(canvas, #this.staff_members["Receptionist"], x + 277, y + 57);
+
+  var total_happiness = 0;
+  var total_fatigue = 0;
+  var total_skill = 0;
+  // Draw each listing
+  var staff_list = this.staff_members[this.category];
+  for( i, staff in ipairs(staff_list) ) {
+    if( ! staff ) {
+      break;
+    }
+    // Morale, tiredness and skill, used to draw the average at the end too.
+    var happiness_bar_width = 0;
+    if( staff.attributes["happiness"] ) {
+      happiness_bar_width = math_floor(staff.attributes["happiness"] * 40 + 0.5);
+      total_happiness = total_happiness + staff.attributes["happiness"];
+    }
+    var fatigue_bar_width = 40.5;
+    if( staff.attributes["fatigue"] ) {
+      total_fatigue = total_fatigue + staff.attributes["fatigue"];
+      fatigue_bar_width = math_floor((1 - staff.attributes["fatigue"]) * 40 + 0.5);
+    }
+    var skill_bar_width = math_floor(staff.profile.skill * 40 + 0.5);
+    total_skill = total_skill + staff.profile.skill;
+    // Is this staff member on the visible page? Then draw him/her
+    if( i > (this.page-1)*10 && i <= this.page*10 ) {
+      var row_no = i - (this.page-1)*10;
+      this.row_blankers[row_no].visible = false;
+      titles->draw(canvas, row_no + 10*(this.page-1), x + 58, y + 63 + row_no*27);
+      titles->draw(canvas, staff.profile.name,        x + 88, y + 63 + row_no*27);
+      titles->draw(canvas, "$" .. staff.profile.wage, x + 230, y + 63 + row_no*27, 80, 0);
+
+      // Draw the morale, tiredness and skill for this staff member
+      if( happiness_bar_width != 0 ) {
+        for( dx = 0, happiness_bar_width - 1 ) {
+          this.panel_sprites->draw(canvas, 16, x + 351 + dx, y + 65 + row_no*27);
+        }
+      }
+      if( fatigue_bar_width != 0 ) {
+        for( dx = 0, fatigue_bar_width - 1 ) {
+          this.panel_sprites->draw(canvas, 15, x + 456 + dx, y + 65 + row_no*27);
+        }
+      }
+      if( skill_bar_width != 0 ) {
+        for( dx = 0, skill_bar_width - 1 ) {
+          this.panel_sprites->draw(canvas, 14, x + 559 + dx, y + 65 + row_no*27);
+        }
+      }
+    }
+  }
+  // Make sure the other ones are not visible
+  for( i = #staff_list + 1 - (this.page-1)*10, 10 ) {
+    this.row_blankers[i].visible = true;
+  }
+  // Draw the average morale, tiredness and skill
+  if( #staff_list != 0 ) {
+    var happiness_bar_width = math_floor((total_happiness/#staff_list) * 40 + 0.5);
+    if( happiness_bar_width != 0 ) {
+      for( dx = 0, happiness_bar_width - 1 ) {
+        this.panel_sprites->draw(canvas, 16, x + 351 + dx, y + 59);
+      }
+    }
+
+    var fatigue_bar_width = math_floor((1 - (total_fatigue/#staff_list)) * 40 + 0.5);
+    if( fatigue_bar_width != 0 ) {
+      for( dx = 0, fatigue_bar_width - 1 ) {
+        this.panel_sprites->draw(canvas, 15, x + 456 + dx, y + 59);
+      }
+    }
+    var skill_bar_width = math_floor((total_skill/#staff_list) * 40 + 0.5);
+    if( skill_bar_width != 0 ) {
+      for( dx = 0, skill_bar_width - 1 ) {
+        this.panel_sprites->draw(canvas, 14, x + 559 + dx, y + 59);
+      }
+    }
+  }
+  // Reset
+  this.progress_surgeon.visible = false;
+  this.qualified_surgeon.visible = false;
+  this.progress_psychiatrist.visible = false;
+  this.qualified_psychiatrist.visible = false;
+  this.progress_researcher.visible = false;
+  this.qualified_researcher.visible = false;
+  this.arrow.visible = false;
+  this.portrait_back.visible = false;
+  // If a staff member is selected, draw picture, skill etc
+  if( this.selected_staff ) {
+    var profile = this.staff_members[this.category][this.selected_staff].profile;
+    // Draw the red rectangle TODO: Make a neater function in C?
+    var red = canvas->mapRGB(221, 83, 0);
+    var y_pos = this.selected_staff - (this.page - 1)*10;
+    canvas->drawRect(red, x + 49, y + y_pos*27 + 54, 581, 1);
+    canvas->drawRect(red, x + 49, y + y_pos*27 + 81, 581, 1);
+    canvas->drawRect(red, x + 49, y + y_pos*27 + 54, 1, 28);
+    canvas->drawRect(red, x + 630, y + y_pos*27 + 54, 1, 28);
+
+    // Current position in the game world
+    var px, py = this->getStaffPosition(37, 61);
+    this.ui.app.map->draw(canvas, px, py, 83, 82, x + 497, y + 373);
+    // Portrait
+    this.portrait_back.visible = true;
+    profile->drawFace(canvas, x + 68, y + 377, this.face_parts);
+
+    // 10 % increase in salary or a bonus:
+    titles->draw(canvas, "$" .. math_floor(profile.wage*0.1), x + 377, y + 387, 45, 0);
+    titles->draw(canvas, "$" .. math_floor(profile.wage*0.1 + profile.wage), x + 377, y + 432, 45, 0);
+
+    // Attention to detail
+    var attention_bar_width = math_floor(profile.attention_to_detail * 40 + 0.5);
+    if( attention_bar_width != 0 ) {
+      for( dx = 0, attention_bar_width - 1 ) {
+        this.panel_sprites->draw(canvas, 13, x + 178 + dx, y + 387);
+      }
+    }
+    // If it is a doctor, draw skills etc.
+    if( this.category == "Doctor" ) {
+      if( profile.is_surgeon > 0 ) {
+        if( profile.is_surgeon >= 1.0 ) {
+          this.qualified_surgeon.visible = true;
+        } else if( ! profile.is_consultant ) {
+          this.progress_surgeon.visible = true;
+          this.progress_surgeon->setTooltip(_S.tooltip.staff_list.surgeon_train->format(math_floor(profile.is_surgeon * 100)));
+          var progress = math_floor(profile.is_surgeon * 23 + 0.5);
+          for( dx = 0, progress - 1 ) {
+            this.panel_sprites->draw(canvas, 13, x + 196 + dx, y + 447);
+          }
+        }
+      }
+      if( profile.is_psychiatrist > 0 ) {
+        if( profile.is_psychiatrist >= 1.0 ) {
+          this.qualified_psychiatrist.visible = true;
+        } else if( ! profile.is_consultant ) {
+          this.progress_psychiatrist.visible = true;
+          this.progress_psychiatrist->setTooltip(_S.tooltip.staff_list.psychiatrist_train->format(math_floor(profile.is_psychiatrist * 100)));
+          var progress = math_floor(profile.is_psychiatrist * 23 + 0.5);
+          for( dx = 0, progress - 1 ) {
+            this.panel_sprites->draw(canvas, 13, x + 236 + dx, y + 447);
+          }
+        }
+      }
+      if( profile.is_researcher > 0 ) {
+        if( profile.is_researcher >= 1.0 ) {
+          this.qualified_researcher.visible = true;
+        } else if( ! profile.is_consultant ) {
+          this.progress_researcher.visible = true;
+          this.progress_researcher->setTooltip(_S.tooltip.staff_list.researcher_train->format(math_floor(profile.is_researcher * 100)));
+          var progress = math_floor(profile.is_researcher * 23 + 0.5);
+          for( dx = 0, progress - 1 ) {
+            this.panel_sprites->draw(canvas, 13, x + 276 + dx, y + 447);
+          }
+        }
+      }
+      // Draw type of doctor
+      this.arrow.visible = true;
+      if( profile.is_consultant ) {
+        this.arrow.x = this.arrow_position + 29;
+      } else if( profile.is_junior ) {
+        this.arrow.x = this.arrow_position - 23;
+      } else {
+      this.arrow.x = this.arrow_position;
+      }
+    }
+  }
+}
+
+function UIStaffManagement::onMouseDown(code, x, y) {
+  if( code == "left" ) {
+    if( x > 50 && x < 490 ) {
+      if( y > 82 && y < 351 ) {
+        if( #this.staff_members[this.category] - (this.page - 1)*10 > math_floor((y - 81)/27) ) {
+          this.selected_staff = math_floor((y - 81)/27) + 1 + (this.page - 1)*10;
+        }
+      }
+    } else if( x > 497 && x < 580 && y > 373 && y < 455 && this.selected_staff ) {
+      // Hit in the view of the staff
+      var ui = this.ui;
+      ui->scrollMapTo(this->getStaffPosition());
+      ui->addWindow(UIStaff(ui, this.staff_members[this.category][this.selected_staff]));
+      this->close();
+      return false;
+    }
+  }
+  return UIFullscreen.onMouseDown(this, code, x, y);
+}
+
+function UIStaffManagement::onMouseWheel(x, y) {
+  if( ! UIFullscreen.onMouseWheel(this, x, y) ) {
+    if( this->hitTest(this.cursor_x, this.cursor_y) ) {
+      if( y > 0 ) {
+        this->scrollUp();
+        return true;
+      } else {
+        this->scrollDown();
+        return true;
+      }
+    }
+    return false;
+  } else {
+    return true;
+  }
+}
+
+function UIFullscreen::getStaffPosition(dx, dy) {
+  var staff = this.staff_members[this.category][this.selected_staff];
+  var x, y = this.ui.app.map->WorldToScreen(staff.tile_x, staff.tile_y);
+  var px, py = staff.th->getMarker();
+  return x + px - (dx || 0), y + py - (dy || 0);
+}
+
+function UIStaffManagement::previousCategory() {
+  if( this.category == "Nurse" ) {
+    this->setCategory("Doctor");
+  } else if( this.category == "Handyman" ) {
+    this->setCategory("Nurse");
+  } else if( this.category == "Receptionist" ) {
+    this->setCategory("Handyman");
+  }
+}
+
+function UIStaffManagement::nextCategory() {
+  if( this.category == "Doctor" ) {
+    this->setCategory("Nurse");
+  } else if( this.category == "Nurse" ) {
+    this->setCategory("Handyman");
+  } else if( this.category == "Handyman" ) {
+    this->setCategory("Receptionist");
+  }
+}
+
+function UIStaffManagement::previousStaff() {
+  // If nothing currently selected, select the last one, otherwise the previous.
+  if( this.selected_staff == null ) {
+    this->selectIndex(#this.staff_members[this.category]);
+  } else {
+    this->selectIndex(this.selected_staff - 1);
+  }
+}
+
+function UIStaffManagement::nextStaff() {
+  // If nothing currently selected, select the first one, otherwise the next.
+  if( this.selected_staff == null ) {
+    this->selectIndex(1);
+  } else {
+    this->selectIndex(this.selected_staff + 1);
+  }
+}
+
+function UIStaffManagement::scrollUp() {
+  if( this.scroll_dot.visible && this.page > 1 ) {
+    this.selected_staff = null;
+    this.page = this.page - 1;
+    this->updateScrollDot();
+  }
+  this->updateTooltips();
+}
+
+function UIStaffManagement::scrollDown() {
+  if( this.scroll_dot.visible && this.page*10 < #this.staff_members[this.category] ) {
+    this.selected_staff = null;
+    this.page = this.page + 1;
+    this->updateScrollDot();
+  }
+  this->updateTooltips();
+}
+
+//! Updates the position of the paging scroll indicator
+function UIStaffManagement::updateScrollDot() {
+  var numPages = math.ceil(#this.staff_members[this.category] / 10);
+  var yOffset = math_floor(83 * ((this.page - 1) / (numPages - 1)));
+  this.scroll_dot.y = 168 + yOffset;
+}
+
+//! Updates whether the paging scroll indicator is visible and its position if visible
+function UIStaffManagement::updateScrollDotVisibility() {
+  if( #this.staff_members[this.category] > 10 ) {
+    this.scroll_dot.visible = true;
+    this->updateScrollDot();
+  } else {
+    this.scroll_dot.visible = false;
+  }
+}
+
+function UIStaffManagement::payBonus() {
+  var staff = this.staff_members[this.category][this.selected_staff];
+  if( this.selected_staff && this.hospital.balance > math_floor(staff.profile.wage*0.1) ) {
+    staff->changeAttribute("happiness", 0.5);
+    this.hospital->spendMoney(math_floor(staff.profile.wage*0.1), _S.transactions.personal_bonus);
+    this.ui->playSound("cashreg.wav");
+  }
+}
+
+function UIStaffManagement::increaseSalary() {
+  if( this.selected_staff ) {
+    var staff = this.staff_members[this.category][this.selected_staff];
+    staff->increaseWage(math_floor(staff.profile.wage*0.1));
+  }
+}
+
+function UIStaffManagement::fire() {
+  if( this.selected_staff ) {
+    this.ui->addWindow(UIConfirmDialog(this.ui, _S.confirmation.sack_staff, /*persistable:staff_management_confirm_sack*/ function() {
+      var current_category = this.staff_members[this.category];
+      current_category[this.selected_staff]->fire();
+      // Close the staff window if open
+      var staff_window = this.ui->getWindow(UIStaff);
+      if( staff_window && staff_window.staff == current_category[this.selected_staff] ) {
+        staff_window->close();
+      }
+      // Update the staff list
+      this->updateStaffList(current_category[this.selected_staff]);
+    })); // End of confirmation dialog
+  }
+}
+
+function UIStaffManagement::close() {
+  UIFullscreen.close(this);
+  this.ui->getWindow(UIBottomPanel)->updateButtonStates();
+}

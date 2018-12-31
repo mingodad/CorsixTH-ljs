@@ -1,0 +1,2357 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("Hospital");
+
+//-@type Hospital
+var Hospital = _G["Hospital"];
+
+function Hospital::Hospital(world, avail_rooms, name) {
+  this.world = world;
+  var level_config = world.map.level_config;
+  var level = world.map.level_number;
+  var balance = 40000;
+  var interest_rate = 0.01;
+  if( level_config ) {
+    if( level_config.towns && level_config.towns[level] ) {
+      balance = level_config.towns[level].StartCash;
+      interest_rate = level_config.towns[level].InterestRate / 10000;
+    } else if( level_config.town ) {
+      balance = level_config.town.StartCash;
+      interest_rate = level_config.town.InterestRate / 10000;
+    }
+  }
+  this.name = name || "PLAYER";
+  // TODO: Variate initial reputation etc based on level
+  // When playing in free build mode you don't care about money.
+  this.balance = ! world.free_build_mode && balance || 0;
+  this.loan = 0;
+  this.acc_loan_interest = 0;
+  this.acc_research_cost = 0;
+  this.acc_overdraft = 0;
+  this.acc_heating = 0;
+  this.discover_autopsy_risk = 10;
+
+  // The sum of all material values (tiles, rooms, objects).
+  // Initial value: hospital tile count * tile value + 20000
+  this.value = world.map->getParcelPrice(this->getPlayerIndex()) + 20000;
+
+  // TODO: With the fame/shame screen and scoring comes salary.
+  this.player_salary = 10000;
+  this.salary_offer = 0;
+
+
+  this.handymanTasks = {};
+  // Represents the "active" epidemic non-nil if
+  // an epidemic is happening currently in the hospital
+  // Only one epidemic is ever "active"
+  this.epidemic = null;
+
+  // The pool of epidemics which may happen in the future.
+  // Epidemic in this table continue in the background its
+  // patients infecting each other. Epidemics are chosen from
+  // this pool to become the "active" epidemic
+  this.future_epidemics_pool = {};
+  // How many epidemics can exist simultaneously counting current and future
+  // epidemics. If epidemic_limit = 1 then only one epidemic can exist at a
+  // time either in the futures pool or as a current epidemic.
+  this.concurrent_epidemic_limit = level_config.gbv.EpidemicConcurrentLimit || 1;
+
+  // Initial values
+  this.interest_rate = interest_rate;
+  this.inflation_rate = 0.045;
+  this.salary_incr = level_config.gbv.ScoreMaxInc || 300;
+  this.sal_min = level_config.gbv.ScoreMaxInc / 6 || 50;
+  this.reputation = 500;
+  this.reputation_min = 0;
+  this.reputation_max = 1000;
+
+  // Price distortion level under which the patients might consider the
+  // treatment to be under-priced (TODO: This could depend on difficulty and/or
+  // level; e.g. Easy: -0.3 / Difficult: -0.5)
+  this.under_priced_threshold = -0.4;
+
+  // Price distortion level over which the patients might consider the
+  // treatment to be over-priced (TODO: This could depend on difficulty and/or
+  // level; e.g. Easy: 0.4 / Difficult: 0.2)
+  this.over_priced_threshold = 0.3;
+
+  this.radiator_heat = 0.5;
+  this.num_visitors = 0;
+  this.num_deaths = 0;
+  this.num_deaths_this_year = 0;
+  this.num_cured = 0;
+  this.not_cured = 0;
+  this.seating_warning = 0;
+  this.num_explosions = 0;
+  this.announce_vip = 0;
+  this.vip_declined = 0;
+  this.num_vips = 0; // used to check if it's the user's first vip
+  this.percentage_cured = 0;
+  this.percentage_killed = 0;
+  this.msg_counter = 0;
+  this.population = 0.25; // TODO: Percentage showing how much of
+  // the total population that goes to the player's hospital,
+  // used for one of the goals. Change when competitors are there.
+  // Since there are none right now the player's hospital always get
+  // 50 % of all patients as soon as gbv.AllocDelay has expired.
+
+  // Statistics used in the graph dialog. Each entry is the month, inside it
+  // is "money in", "money out", wages, balance, visitors, cures, deaths, reputation
+  // statistic[i] shows what the values were when going from month i - 1 to i.
+  this.statistics = {
+    {
+      money_in = 0,
+      money_out = 0,
+      wages = 0,
+      balance = balance,
+      visitors = 0,
+      cures = 0,
+      deaths = 0,
+      reputation = 500, // TODO: Always 500 from the beginning?
+    }
+  };
+  this.money_in = 0;
+  this.money_out = 0;
+
+  // Other statistics, back to zero each year
+  this.sodas_sold = 0;
+  this->checkReputation(); // Reset self.reputation_above_threshold
+  this.num_vips_ty  = 0; // used to count how many VIP visits in the year for an award
+  this.pleased_vips_ty  = 0;
+  this.num_cured_ty = 0;
+  this.not_cured_ty = 0;
+  this.num_visitors_ty = 0;
+
+  this.ownedPlots = {1}; // Plots owned by the hospital
+  this.ratholes = {}; // List of table {x, y, wall, parcel, optional object} for ratholes in the hospital corridors.
+  this.is_in_world = true; // Whether the hospital is in this world (AI hospitals are not)
+  this.opened = false;
+  this.transactions = {};
+  this.staff = {};
+  this.patients = {};
+  this.debug_patients = {}; // right-click-commandable patients for testing
+  this.disease_casebook = {};
+  this.policies = {};
+  this.discovered_diseases = {}; // a list
+
+  this.discovered_rooms = {}; // a set; keys are the entries of TheApp.rooms, values are true or nil
+  this.undiscovered_rooms = {}; // NB: These two together must form the list world.available_rooms
+  for( _, avail_room in ipairs(avail_rooms) ) {
+    if( avail_room.is_discovered ) {
+      this.discovered_rooms[avail_room.room] = true;
+    } else {
+      this.undiscovered_rooms[avail_room.room] = true;
+    }
+  }
+
+  this.policies["staff_allowed_to_move"] = true;
+  this.policies["send_home"] = 0.1;
+  this.policies["guess_cure"] = 0.9;
+  this.policies["stop_procedure"] = 1; // Note that this is between 1 and 2 ( = 100% - 200%)
+  this.policies["goto_staffroom"] = 0.6;
+  this.policies["grant_wage_increase"] = TheApp.config.grant_wage_increase;
+  // Randomly select three insurance companies to use, only different by name right now.
+  // The first ones are more likely to come
+  this.insurance = {};
+  for( no, local_name in ipairs(_S.insurance_companies) ) {
+    // NOTE: Will not work if more companies are added
+    if( math.random(1, 11) < 4 || 11 - no < #this.insurance + 3 ) {
+      this.insurance[#this.insurance + 1] = local_name;
+    }
+    if( #this.insurance > 2 ) {
+      break;
+    }
+  }
+  // A list of how much each insurance company owes you. The first entry for
+  // each company is the current month's dept, the second the previous
+  // month and the third the month before that.
+  // All payment that goes through an insurance company a given month is paid two
+  // months later. For example diagnoses in April are paid the 1st of July
+  this.insurance_balance = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+
+  // Initialize diseases
+  var diseases = TheApp.diseases;
+  var expertise = level_config.expertise;
+  var gbv = level_config.gbv;
+  for( _, disease in ipairs(diseases) ) {
+    var disease_available = true;
+    var drug_effectiveness = 95;
+    var drug = disease.treatment_rooms && disease.treatment_rooms[1] == "pharmacy" || null;
+    var drug_cost = 100;
+    if( expertise ) {
+      disease_available = expertise[disease.expertise_id].Known == 1;
+      // This means that the config is available
+      drug_effectiveness = gbv.StartRating;
+      drug_cost = gbv.StartCost;
+    }
+    if( world.available_diseases[disease.id] || disease.pseudo ) {
+      var info = {
+        reputation = ! disease.pseudo && 500 || null,
+        price = 1.0, // user-set multiplier between 0.5 and 2.0
+        money_earned = 0,
+        recoveries = 0,
+        fatalities = 0,
+        turned_away = 0,
+        disease = disease,
+        discovered = disease_available,
+        concentrate_research = false,
+        cure_effectiveness = drug && drug_effectiveness || 100,
+        // This will only work as long as there's only one treatment room.
+        drug = drug,
+        drug_cost = drug && drug_cost,
+        psychiatrist = disease.treatment_rooms && disease.treatment_rooms[1] == "psych" || null,
+        machine = disease.requires_machine,
+        // This assumes we always have the ward then the operating_theatre as treatment rooms.
+        surgeon = disease.treatment_rooms && disease.treatment_rooms[2] == "operating_theatre" || null,
+        researcher = disease.requires_researcher, // TODO: Fix when aliens are in the game.
+        pseudo = disease.pseudo, // Diagnosis is pseudo
+      };
+      this.disease_casebook[disease.id] = info;
+      if( disease_available && ! disease.pseudo ) {
+        this.discovered_diseases[#this.discovered_diseases + 1] = disease.id;
+      }
+    }
+  }
+  this.research = ResearchDepartment(this);
+
+  // Initialize build cost for all available rooms.
+  for( _, avail_room in ipairs(avail_rooms) ) {
+    this.research.research_progress[avail_room.room] = {
+        // In free build mode, everything is freely available.
+        build_cost = ! this.free_build_mode && avail_room.build_cost || 0,
+      };
+  }
+}
+
+// Seasoned players will know these things, but it does not harm to be reminded if there is no staff room or toilet!
+function Hospital::noStaffroom_msg() {
+  var staffroom_msg = {
+    (_A.warnings.build_staffroom),
+    (_A.warnings.need_staffroom),
+    (_A.warnings.staff_overworked),
+    (_A.warnings.staff_tired),
+  };
+  if( staffroom_msg ) {
+    this.world.ui.adviser->say(staffroom_msg[math.random(1, #staffroom_msg)]);
+    this.staff_room_msg = true;
+  }
+}
+
+function Hospital::noToilet_msg() {
+  var toilet_msg = {
+    (_A.warnings.need_toilets),
+    (_A.warnings.build_toilets),
+    (_A.warnings.build_toilet_now),
+  };
+  if( toilet_msg ) {
+    this.world.ui.adviser->say(toilet_msg[math.random(1, #toilet_msg)]);
+    this.toilet_msg = true;
+  }
+}
+
+// Give praise where it is due
+function Hospital::praiseBench() {
+  var bench_msg = {
+    (_A.praise.many_benches),
+    (_A.praise.plenty_of_benches),
+    (_A.praise.few_have_to_stand),
+  };
+  if( bench_msg ) {
+    this.world.ui.adviser->say(bench_msg[math.random(1, #bench_msg)]);
+    this.bench_msg = true;
+  }
+}
+
+//! Messages regarding numbers cured and killed
+function Hospital::msgCured() {
+  var msg_chance = math.random(1, 15);
+  if( this.num_cured > 1 ) {
+    if( msg_chance == 3 && this.msg_counter > 10 ) {
+      this.world.ui.adviser->say(_A.level_progress.another_patient_cured->format(this.num_cured));
+      this.msg_counter = 0;
+    } else if( msg_chance == 12 && this.msg_counter > 10 ) {
+      this.world.ui.adviser->say(_A.praise.patients_cured->format(this.num_cured));
+      this.msg_counter = 0;
+    }
+  }
+}
+//! So the messages don't show too often there will need to be at least 10 days before one can show again.
+function Hospital::msgKilled() {
+  var msg_chance = math.random(1, 10);
+  if( this.num_deaths > 1 ) {
+    if( msg_chance < 4 && this.msg_counter > 10 ) {
+      this.world.ui.adviser->say(_A.warnings.many_killed->format(this.num_deaths));
+      this.msg_counter = 0;
+    } else if( msg_chance > 7 && this.msg_counter > 10 ) {
+      this.world.ui.adviser->say(_A.level_progress.another_patient_killed->format(this.num_deaths));
+      this.msg_counter = 0;
+    }
+  }
+}
+
+// Warn if the hospital is lacking some basics
+function Hospital::warningBench() {
+  var bench_msg = {
+    (_A.warnings.more_benches),
+    (_A.warnings.people_have_to_stand),
+  };
+  if( bench_msg ) {
+    this.world.ui.adviser->say(bench_msg[math.random(1, #bench_msg)]);
+    this.bench_msg = true;
+  }
+}
+
+// Warn when it is too hot
+function Hospital::warningTooHot() {
+  var hot_msg = {
+    (_A.information.initial_general_advice.decrease_heating),
+    (_A.warnings.patients_too_hot),
+    (_A.warnings.patients_getting_hot),
+  };
+  if( hot_msg ) {
+    this.world.ui.adviser->say(hot_msg[math.random(1, #hot_msg)]);
+    this.warmth_msg = true;
+  }
+}
+
+// Warn when it is too cold
+function Hospital::warningTooCold() {
+  var cold_msg = {
+    (_A.information.initial_general_advice.increase_heating),
+    (_A.warnings.patients_very_cold),
+    (_A.warnings.people_freezing),
+  };
+  if( cold_msg ) {
+    this.world.ui.adviser->say(cold_msg[math.random(1, #cold_msg)]);
+    this.warmth_msg = true;
+  }
+}
+
+function Hospital::warningThirst() {
+  var thirst_msg = {
+    (_A.warnings.patients_thirsty),
+    (_A.warnings.patients_thirsty2),
+  };
+  if( thirst_msg ) {
+    this.world.ui.adviser->say(thirst_msg[math.random(1, #thirst_msg)]);
+    this.thirst_msg = true;
+  }
+}
+
+// Remind the player when cash is low that a loan might be available
+function Hospital::cashLow() {
+  // Don't remind in free build mode.
+  if( this.world.free_build_mode ) {
+    return;
+  }
+  var hosp = this.world.hospitals[1];
+  var cashlowmessage = {
+    (_A.warnings.money_low),
+    (_A.warnings.money_very_low_take_loan),
+    (_A.warnings.cash_low_consider_loan),
+  };
+  if( hosp.balance < 2000 && hosp.balance >= -500 ) {
+    hosp.world.ui.adviser->say(cashlowmessage[math.random(1, #cashlowmessage)]);
+  } else if( hosp.balance < -2000 && hosp.world->date()->monthOfYear() > 8 ) {
+    // ideally this should be linked to the lose criteria for balance
+    hosp.world.ui.adviser->say(_A.warnings.bankruptcy_imminent);
+  }
+}
+
+function Hospital::afterLoad(old, new) {
+  if( old < 8 ) {
+    // The list of discovered rooms was not saved. The best we can do is make everything
+    // discovered which is available for the level.
+    this.discovered_rooms = {};
+    for( _, room in ipairs(this.world.available_rooms) ) {
+      this.discovered_rooms[room] = true;
+    }
+  }
+  if( old < 9 ) {
+    // Initial opening added
+    this.opened = true;
+  }
+  if( old < 14 ) {
+    // NOTE: This will no longer work, but cluttering the code with stub functions
+    // for this "old" compatibility, is it necessary?
+    this->_initResearch();
+  }
+  if( old < 19 ) {
+    // The statistics on the current map will be wrong, but it's better than nothing.
+    this.num_visitors = 0;
+    this.player_salary = 10000;
+    this.sodas_sold = 0;
+  }
+  if( old < 20 ) {
+    // New variables
+    this.acc_loan_interest = 0;
+    this.acc_research_cost = 0;
+    // Go through all diseases and remove individual reputation for diagnoses
+    for( _, disease in pairs(this.disease_casebook) ) {
+      if( disease.pseudo == true ) {
+        disease.reputation = null;
+      }
+    }
+    // Go through all possible rooms and add those not researched to the research list.
+    this.research_rooms = {};
+    var next_diag = null;
+    var next_cure = null;
+    for( _, room in ipairs(this.world.available_rooms) ) {
+      if( ! this.discovered_rooms[room] ) {
+        this.research_rooms[room] = 0;
+        if( room.categories.diagnosis ) {
+          next_diag = room;
+        } else {
+          next_cure = room;
+        }
+      }
+    }
+    // Go through all rooms and find if a research department has been built
+    // Also check for training rooms where the training_factor needs to be set
+    for( _, room in pairs(this.world.rooms) ) {
+      if( room.room_info.id == "research" ) {
+        this.research_dep_built = true;
+      } else if( room.room_info.id == "training" ) {
+        // A standard value to keep things going
+        room.training_factor = 5;
+      }
+    }
+    // Redefine the research table
+    this.research = {
+      improvements =   {frac = 20, points = 0, current = "inflation"},
+      drugs =          {frac = 20, points = 0, current = "invisibility"},
+      diagnosis =      {frac = 20, points = 0, current = next_diag},
+      cure =           {frac = 20, points = 0, current = next_cure},
+      specialisation = {frac = 20, points = 0, current = "special"},
+      global = 100,
+    };
+    this.discover_autopsy_risk = 10;
+  }
+  if( old < 24 ) {
+    // New variables
+    this.salary_incr = 300;
+    this.sal_min = 50;
+    this.salary_offer = 0;
+  }
+  if( old < 25 ) {
+    this.insurance_balance = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    this.num_deaths_this_year = 0;
+  }
+  if( old < 30 ) {
+    if( this.emergency ) {
+      this.emergency.percentage = 0.75;
+    }
+  }
+  if( old < 33 ) {
+    // Research has been revamped and expanded. Drugs and improvements
+    // will work fine, but room research needs to be rebuilt.
+    var research = ResearchDepartment(this);
+    this.undiscovered_rooms = {};
+    var cure, diagnosis;
+    var cfg_objects = this.world.map.level_config.objects;
+    for( _, room in ipairs(this.world.available_rooms) ) {
+      // If a room is discovered, make sure its objects are also
+      // discovered, otherwise add it to the undiscovered list.
+      if( this.discovered_rooms[room] ) {
+        for( name, _ in pairs(room.objects_needed) ) {
+          var object = TheApp.objects[name];
+          if( cfg_objects[object.thob] && cfg_objects[object.thob].AvailableForLevel == 1 &&
+              object.research_category && ! research.research_progress[object].discovered ) {
+            var progress = this.research_rooms[room];
+            if( this.research.cure.current == room || this.research.diagnosis.current == room ) {
+              progress = progress + this.research.diagnosis.points;
+            }
+            research.research_progress[object].discovered = true;
+            research.research_progress[object].points = progress;
+          }
+        }
+      } else {
+        this.undiscovered_rooms[room] = true;
+        if( ! cure || ! diagnosis ) {
+          for( name, _ in pairs(room.objects_needed) ) {
+            var object = TheApp.objects[name];
+            if( cfg_objects[object.thob] && cfg_objects[object.thob].AvailableForLevel == 1 &&
+                object.research_category && ! research.research_progress[object].discovered ) {
+              if( object.research_category == "cure" ) {
+                cure = object;
+              } else if( object.research_category == "diagnosis" ) {
+                diagnosis = object;
+              }
+            }
+          }
+        }
+      }
+    }
+    var policy = research.research_policy;
+    if( cure ) {
+      policy.cure.current = cure;
+    } else {
+      policy.global = policy.global - policy.cure.frac;
+      policy.cure.frac = 0;
+    }
+    if( diagnosis ) {
+      research.research_policy.diagnosis.current = diagnosis;
+    } else {
+      policy.global = policy.global - policy.diagnosis.frac;
+      policy.diagnosis.frac = 0;
+    }
+    this.research = research;
+    this.research_rooms = null;
+    // Cost of rooms has also been changed
+    var rooms = this.world.map.level_config.rooms;
+    if( ! rooms ) {
+      // Add the new variables manually.
+      rooms = {
+        [7] = {Cost = 2280}, // GP_OFFICE
+        [8] = {Cost = 2270}, // PSYCHO
+        [9] = {Cost = 1700}, // WARD
+        [10] = {Cost = 2250}, // OP_THEATRE
+        [11] = {Cost = 500}, // PHARMACY
+        [12] = {Cost = 470}, // CARDIO
+        [13] = {Cost = 3970}, // SCANNER
+        [14] = {Cost = 2000}, // ULTRASCAN
+        [15] = {Cost = 3000}, // BLOOD_MACHINE
+        [16] = {Cost = 2000}, // XRAY
+        [17] = {Cost = 1500}, // INFLATOR
+        [18] = {Cost = 7000}, // ALIEN
+        [19] = {Cost = 500}, // HAIR_RESTORER
+        [20] = {Cost = 1500}, // SLACK_TONGUE
+        [21] = {Cost = 500}, // FRACTURE
+        [22] = {Cost = 1850}, // TRAINING
+        [23] = {Cost = 500}, // ELECTRO
+        [24] = {Cost = 4500}, // JELLY_VAT
+        [25] = {Cost = 1350}, // STAFF ROOM
+        [26] = {Cost = 5}, // TV ??
+        [27] = {Cost = 720}, // GENERAL_DIAG
+        [28] = {Cost = 800}, // RESEARCH
+        [29] = {Cost = 1170}, // TOILETS
+        [30] = {Cost = 5500}, // DECON_SHOWER
+      };
+      this.world.map.level_config.rooms = rooms;
+    }
+    for( _, room in ipairs(TheApp.rooms) ) {
+      // Sum up the build cost of the room
+      var build_cost = rooms[room.level_config_id].Cost;
+      for( name, no in pairs(room.objects_needed) ) {
+        // Add cost for this object.
+        build_cost = build_cost + cfg_objects[TheApp.objects[name].thob].StartCost * no;
+      }
+      // Now define the total build cost for the room.
+      room.build_cost = build_cost;
+    }
+  }
+  if( old < 34 ) {
+    // New variable
+    this.acc_overdraft = 0;
+  }
+  if( old < 35 ) {
+    // Define build costs for rooms once again.
+    var cfg_objects = this.world.map.level_config.objects;
+    var cfg_rooms = this.world.map.level_config.rooms;
+    for( _, room in ipairs(TheApp.rooms) ) {
+      // Sum up the build cost of the room
+      var build_cost = cfg_rooms[room.level_config_id].Cost;
+      for( name, no in pairs(room.objects_needed) ) {
+        // Add cost for this object.
+        build_cost = build_cost + cfg_objects[TheApp.objects[name].thob].StartCost * no;
+      }
+      // Now define the total build cost for the room.
+      this.research.research_progress[room] = {
+        build_cost = build_cost,
+      };
+    }
+  }
+  if( old < 39 ) {
+    this.acc_heating = 0;
+  }
+  if( old < 40 ) {
+    this.statistics = {};
+    this.money_in = 0;
+    this.money_out = 0;
+  }
+  if( old < 41 ) {
+    this.boiler_can_break = true;
+  }
+
+  if( old < 45 ) {
+    this.num_explosions = 0;
+    this.num_vips = 0;
+  }
+
+  if( old < 48 ) {
+    this.seating_warning = 0;
+  }
+
+  if( old < 50 ) {
+    this.num_vips_ty = 0;
+    this.pleased_vips_ty = 0;
+    this.num_cured_ty = 0;
+    this.not_cured_ty = 0;
+    this.num_visitors_ty = 0;
+  }
+
+  if( old < 52 ) {
+    this->initOwnedPlots();
+    this.handymanTasks = {};
+  }
+
+  if( old < 54 ) {
+    var current = this.research.research_policy.specialisation.current;
+      if( current && ! current.dummy && ! current.thob && ! current.drug ) {
+        for( _, disease_entry in pairs(this.disease_casebook) ) {
+        if( disease_entry.concentrate_research ) {
+          this.research->concentrateResearch(disease_entry.disease.id);
+          this.research->concentrateResearch(disease_entry.disease.id);
+        }
+      }
+    }
+  }
+
+  if( old < 56 ) {
+    this.research_dep_built = false;
+  }
+  if( old < 76 ) {
+    this.msg_counter = 0;
+  }
+  if( old < 84 ) {
+    this.vip_declined = 0;
+  }
+
+  if( old < 88 ) {
+    this.future_epidemics_pool = {};
+    this.concurrent_epidemic_limit = this.world.map.level_config.gbv.EpidemicConcurrentLimit || 1;
+  }
+
+  if( old < 107 ) {
+    this.reception_desks = null;
+  }
+
+  if( old < 109 ) {
+    // price distortion
+    this.under_priced_threshold = -0.4;
+    this.over_priced_threshold = 0.3;
+  }
+
+  if( old < 111 ) {
+    this.initial_grace = null;
+  }
+
+  if( old < 114 ) {
+    this.ratholes = {};
+  }
+
+  // Update other objects in the hospital (added in version 106).
+  if( this.epidemic ) { this.epidemic.afterLoad(old, new); }
+  for( _, future_epidemic in ipairs(this.future_epidemics_pool) ) {
+    future_epidemic.afterLoad(old, new);
+  }
+  this.research.afterLoad(old, new);
+}
+
+//! Update the Hospital.patientcount variable.
+function Hospital::countPatients() {
+  // I have taken the patient count out of town map, from memory it does not work the other way round.
+  // i.e. calling it from town map to use here
+  // so Town map now takes this information from here.  (If I am wrong, put it back)
+  this.patientcount = 0;
+  for( _, patient in ipairs(this.patients) ) {
+  // only count patients that are in the hospital
+    var tx, ty = patient.tile_x, patient.tile_y;
+    if( tx && ty && this->isInHospital(tx, ty) ) {
+      this.patientcount = this.patientcount + 1;
+    }
+  }
+}
+
+//! Count number of sitting and standing patients in the hospital.
+//!return (integer, integer) Number of sitting and number of standing patient in the hospital.
+function Hospital::countSittingStanding() {
+  var numberSitting = 0;
+  var numberStanding = 0;
+  for( _, patient in ipairs(this.patients) ) {
+    var pat_action = patient->getCurrentAction();
+    if( pat_action.name == "idle" ) {
+      ++numberStanding    ;
+    } else if( pat_action.name == "use_object" && pat_action.object.object_type.id == "bench" ) {
+      ++numberSitting    ;
+    }
+  }
+  return numberSitting, numberStanding;
+}
+
+
+// A range of checks to help a new player. These are set days apart and will show no more than once a month
+function Hospital::checkFacilities() {
+  var current_date = this.world->date();
+  var day = current_date->dayOfMonth();
+  // All messages are shown after first 4 months if respective conditions are met
+  if( this->isPlayerHospital() && current_date >= Date(1,5) ) {
+    // If there is no staff room, remind player of the need to build one
+    if( ! this.staff_room_msg && day == 3 && ! this->hasRoomOfType("staff_room") ) {
+      this->noStaffroom_msg();
+    }
+    // If there is no toilet, remind player of the need to build one
+    if( ! this.toilet_msg && day == 8 && ! this->hasRoomOfType("toilets") ) {
+      this->noToilet_msg();
+    }
+
+    if( ! this.bench_msg ) {
+      // How are we for seating, if there are plenty then praise is due, if not the player is warned
+      // check the seating : standing ratio of waiting patients
+      // find all the patients who are currently waiting around
+      var numberSitting, numberStanding = this->countSittingStanding();
+
+      // If there are patients standing then maybe the seating is in the wrong place!
+      // set to 5% (standing:seated) if there are more than 50 patients or 20% if there are less than 50.
+      // If this happens for 10 days in any month you are warned about seating unless you have already been warned that month
+      // So there are now two checks about having enough seating, if either are called then you won't receive praise. (may need balancing)
+      var number_standing_threshold = numberSitting / (this.patientcount < 50 && 5 || 20);
+      if( numberStanding > number_standing_threshold ) {
+        this.seating_warning = this.seating_warning + 1;
+        if( this.seating_warning >= 10 ) {
+          this->warningBench();
+        }
+      }
+
+      if( day == 12 ) {
+        // If there are less patients standing than sitting (1:20) and there are more benches than patients in the hospital
+        // you have plenty of seating.  If you have not been warned of standing patients in the last month, you could be praised.
+
+        // We don't want to see praise messages about seating every month, so randomise the chances of it being shown
+        var show_praise = math.random(1, 4) == 4;
+        if( this.world.object_counts.bench > this.patientcount && show_praise ) {
+          this->praiseBench();
+        // Are there enough benches for the volume of patients in your hospital?
+        } else if( this.world.object_counts.bench < this.patientcount ) {
+          this->warningBench();
+        }
+      }
+    }
+
+    // Make players more aware of the need for radiators
+    if( this.world.object_counts.radiator == 0 ) {
+      this.world.ui.adviser->say(_A.information.initial_general_advice.place_radiators);
+    }
+
+    // Now to check how warm or cold patients and staff are. So that we are not bombarded with warmth
+    // messages if we are told about patients then we won't be told about staff as well in the same month
+    // And unlike TH we don't want to be told that anyone is too hot or cold when the boiler is broken do we!
+    if( ! this.warmth_msg && ! this.heating_broke ) {
+      if( day == 15 ) {
+        var warmth = this->getAveragePatientAttribute("warmth", 0.3); // Default value does not result in a message.
+        if( warmth < 0.22 ) {
+          this->warningTooCold();
+        } else if( warmth >= 0.36 ) {
+          this->warningTooHot();
+        }
+      }
+      // Are the staff warm enough?
+      if( day == 20 ) {
+        var avgWarmth = this->getAverageStaffAttribute("warmth", 0.25); // Default value does not result in a message.
+        if( avgWarmth < 0.22 ) {
+          this.world.ui.adviser->say(_A.warnings.staff_very_cold);
+        } else if( avgWarmth >= 0.36 ) {
+          this.world.ui.adviser->say(_A.warnings.staff_too_hot);
+        }
+      }
+    }
+
+    // Are the patients in need of a drink
+    if( ! this.thirst_msg && day == 24 ) {
+      var thirst = this->getAveragePatientAttribute("thirst", 0); // Default value does not result in a message.
+      var thirst_threshold = current_date->year() == 1 && 0.8 || 0.9;
+      if( thirst > thirst_threshold ) {
+        this.world.ui.adviser->say(_A.warnings.patients_very_thirsty);
+      } else if( thirst > 0.6 ) {
+        this->warningThirst();
+      }
+    }
+
+    // reset all the messages on 28th of each month
+    if( day == 28 ) {
+      this.staff_room_msg = false;
+      this.toilet_msg = false;
+      this.bench_msg = false;
+      this.cash_msg = false;
+      this.warmth_msg = false;
+      this.thirst_msg = false;
+      this.seating_warning = 0;
+    }
+  }
+}
+
+//! Called each tick, also called 'hours'. Check hours_per_day in
+//! date.lua to see how many times per day this is.
+function Hospital::tick() {
+// add some random background sounds, ringing phones, coughing, belching etc
+  this->countPatients();
+  var sounds = {
+  "ispot001.wav", "ispot002.wav", "ispot003.wav", "ispot004.wav", "ispot005.wav", "ispot006.wav", "ispot007.wav", "ispot008.wav",
+  "ispot009.wav", "ispot010.wav", "ispot011.wav", "ispot012.wav", "ispot013.wav", "ispot014.wav", "ispot015.wav", "ispot016.wav",
+  "ispot017.wav", "ispot018.wav", "ispot019.wav", "ispot020.wav", "ispot021.wav", "ispot022.wav", "ispot023.wav", "ispot024.wav",
+  "ispot025.wav"
+  }; // ispot026 and ispot027 are both toilet related sounds
+// wait until there are some patients in the hospital and a room, otherwise you will wonder who is coughing or who is the
+// receptionist telephoning! opted for gp as you can't run the hospital without one.
+  if( this->hasRoomOfType("gp") && this.patientcount > 2 ) {
+    if( math.random(1, 100) == 3 ) {
+      var sound_to_play = sounds[math.random(1, #sounds)];
+      if( TheApp.audio->soundExists(sound_to_play) ) {
+        this.world.ui->playSound(sound_to_play);
+      }
+    }
+  }
+  this->manageEpidemics();
+}
+
+function Hospital::purchasePlot(plot_number) {
+  var map = this.world.map;
+  if( map.th->isParcelPurchasable(plot_number, this->getPlayerIndex()) && ! this.world.ui.transparent_walls ) {
+    var cost = ! this.world.free_build_mode && map->getParcelPrice(plot_number) || 0;
+    if( cost <= this.balance ) {
+      this.world->setPlotOwner(plot_number, this->getPlayerIndex());
+      table.insert(this.ownedPlots, plot_number);
+      // Also make sure to apply transparency to the new walls, if required.
+      this.world.ui->applyTransparency();
+      this->spendMoney(cost, _S.transactions.buy_land, cost);
+      return true;
+    } else {
+    // Give visual warning that player doesn't have enough $ to build
+    // Let the message remain unitl cancelled by the player as it is being displayed behind the town map
+      this.world.ui.adviser->say(_A.warnings.cannot_afford_2, true, true);
+    }
+  }
+  return false;
+}
+
+function Hospital::getPlayerIndex() {
+  // TODO: In multiplayer, return 2 or 3 or 4
+  return 1;
+}
+
+//! Returns the heliport x and y coordinates or nil if none exist.
+//!return (pair of integers, or nil) The x,y position of the tile with the heliport, if it exists.
+function Hospital::getHeliportPosition() {
+  var x, y = this.world.map.th->getHeliportTile(this->getPlayerIndex());
+  // NB: Level 2 has a heliport tile set, but no heliport, so we ensure that
+  // the specified tile is suitable by checking the spawn tile for
+  // passability.
+  if( y > 0 && this.world.map->getCellFlag(x, y, "passable") ) {
+    return x, y;
+  }
+}
+
+//! Returns the tile on which patients should spawn when getting out of the helicopter.
+//!return (pair of integers, or nil) The x,y position to use for spawning emergency patients from the heliport, if available.
+function Hospital::getHeliportSpawnPosition() {
+  var x, y = this->getHeliportPosition();
+  if( x && y ) {
+    return x, y - 1;
+  }
+}
+
+/* Test if a given map tile is part of this hospital.
+!param x (integer) The 1-based X co-ordinate of the tile to test.
+!param y (integer) The 1-based Y co-ordinate of the tile to test.
+*/
+function Hospital::isInHospital(x, y) {
+  var flags = this.world.map.th->getCellFlags(x, y);
+  return flags.hospital && flags.owner == this->getPlayerIndex();
+}
+function Hospital::coldWarning() {
+  var announcements = {
+    "sorry002.wav", "sorry004.wav",
+  };
+  if( announcements && this->isPlayerHospital() ) {
+    this.world.ui->playAnnouncement(announcements[math.random(1, #announcements)]);
+  }
+}
+function Hospital::hotWarning() {
+  var announcements = {
+    "sorry003.wav", "sorry004.wav",
+  };
+  if( announcements && this->isPlayerHospital() ) {
+    this.world.ui->playAnnouncement(announcements[math.random(1, #announcements)]);
+  }
+}
+// Called when the hospitals's boiler has broken down.
+// It will remain broken for a certain period of time.
+function Hospital::boilerBreakdown() {
+  this.curr_setting = this.radiator_heat;
+  this.radiator_heat = math.random(0, 1);
+  this.boiler_countdown = math.random(7, 25);
+
+  this.heating_broke = true;
+
+  // Only show the message when relevant to the local player's hospital.
+  if( this->isPlayerHospital() ) {
+    if( this.radiator_heat == 0 ) {
+      this.world.ui.adviser->say(_A.boiler_issue.minimum_heat);
+      this->coldWarning();
+    } else {
+      this.world.ui.adviser->say(_A.boiler_issue.maximum_heat);
+      this->hotWarning();
+    }
+  }
+}
+
+// When the boiler has been repaired this function is called.
+function Hospital::boilerFixed() {
+  this.radiator_heat = this.curr_setting;
+  this.heating_broke = false;
+  if( this->isPlayerHospital() ) {
+    this.world.ui.adviser->say(_A.boiler_issue.resolved);
+  }
+}
+
+//! Daily update of the ratholes.
+//!param self (Hospital) hospital being updated.
+var function dailyUpdateRatholes(this) {
+  var map = this.world.map;
+  var th = map.th;
+
+  var wanted_holes = math.round(th->getLitterFraction(this->getPlayerIndex()) * 200);
+  if( #this.ratholes < wanted_holes ) { // Not enough holes, find a new spot
+    // Try to find a wall in a corridor, and add it if possible.
+    // Each iteration does a few probes at a random position, most tries will
+    // fail on not being on a free (non-built) tile in a corridor with a wall
+    // in the right hospital.
+    // Doing more iterations speeds up finding a suitable location, less
+    // iterations is reduces needed processor time.
+    // "6 + 2 * difference" is an arbitrary value that seems to work nicely, 12
+    // is an arbitrary upper limit on the number of tries.
+    for( _ = 1, math.min(12, 6 + 2 * (wanted_holes - #this.ratholes)) ) {
+      var x = math.random(1, map.width);
+      var y = math.random(1, map.height);
+      var flags = th->getCellFlags(x, y);
+      if( this->isInHospital(x, y) && flags.roomId == 0 && flags.buildable ) {
+        var walls = this->getWallsAround(x, y);
+        if( #walls > 0 ) {
+          // Found a wall, check it for not being used.
+          var wall = walls[math.random(1, #walls)];
+          var found = false;
+          for( _, hole in ipairs(this.ratholes) ) {
+            if( hole.x == x && hole.y == y && hole.wall == wall.wall ) {
+              found = true;
+              break;
+            }
+          }
+
+          if( ! found ) {
+            this->addRathole(x, y, wall.wall, wall.parcel);
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
+// Called at the end of each day.
+function Hospital::onEndDay() {
+  var pay_this = this.loan*this.interest_rate/365; // No leap years
+  this.acc_loan_interest = this.acc_loan_interest + pay_this;
+  this.research->researchCost();
+  if( this->hasStaffedDesk() ) {
+    this->checkFacilities();
+  }
+  this.show_progress_screen_warnings = math.random(1, 3); // used in progress report to limit warnings
+  this.msg_counter = this.msg_counter + 1;
+  if( this.balance < 0 ) {
+    // TODO: Add the extra interest rate to level configuration.
+    var overdraft_interest = this.interest_rate + 0.02;
+    var overdraft = math.abs(this.balance);
+    var overdraft_payment = (overdraft*overdraft_interest)/365;
+    this.acc_overdraft = this.acc_overdraft + overdraft_payment;
+  }
+  var hosp = this.world.hospitals[1];
+  hosp.receptionist_count = 0;
+  for( _, staff in ipairs(this.staff) ) {
+    if( staff.humanoid_class == "Receptionist" ) {
+      hosp.receptionist_count = hosp.receptionist_count + 1;
+    }
+  }
+
+  // check if we still have to announce VIP visit
+  if( this.announce_vip > 0 ) {
+    // check if the VIP is in the building yet
+    for( _, e in ipairs(this.world.entities) ) {
+      if( e.humanoid_class == "VIP" && e.announced == false ) {
+        if( this->isInHospital(e.tile_x, e.tile_y) && this->isPlayerHospital() ) {
+          // play VIP arrival sound and show tooltips
+          e->announce();
+          e.announced = true;
+          this.announce_vip = this.announce_vip - 1;
+        }
+      }
+    }
+  }
+
+  // Countdown for boiler breakdowns
+  if( this.heating_broke ) {
+    this.boiler_countdown = this.boiler_countdown - 1;
+    if( this.boiler_countdown == 0 ) {
+      this->boilerFixed();
+    }
+  }
+
+  // Is the boiler working today?
+  var breakdown = math.random(1, 240);
+  if( breakdown == 1 && ! this.heating_broke && this.boiler_can_break &&
+      this.world.object_counts.radiator > 0 ) {
+    if( tonumber(this.world.map.level_number) ) {
+      if( this.world.map.level_number == 1 && (this.world->date() >= Date(1,6)) ) {
+        this->boilerBreakdown();
+      } else if( this.world.map.level_number > 1 ) {
+        this->boilerBreakdown();
+      }
+    } else {
+      this->boilerBreakdown();
+    }
+  }
+
+  // Calculate heating cost daily.  Divide the monthly cost by the number of days in that month
+  var radiators = this.world.object_counts.radiator;
+  var heating_costs = (((this.radiator_heat * 10) * radiators) * 7.50) / this.world->date()->lastDayOfMonth();
+  this.acc_heating = this.acc_heating + heating_costs;
+
+  if( this->isPlayerHospital() ) { dailyUpdateRatholes(this); }
+}
+
+// Called at the end of each month.
+function Hospital::onEndMonth() {
+  // Spend wages
+  var wages = 0;
+  var current_month = this.world->date()->monthOfYear();
+  for( _, staff in ipairs(this.staff) ) {
+    wages = wages + staff.profile.wage;
+  }
+  if( wages != 0 ) {
+    this->spendMoney(wages, _S.transactions.wages);
+  }
+  // Pay heating costs
+  if( math.round(this.acc_heating) > 0 ) {
+    this->spendMoney(math.round(this.acc_heating), _S.transactions.heating);
+    this.acc_heating = 0;
+  }
+  // how is the bank balance
+  if( this->isPlayerHospital() ) {
+    if( this.balance < 1000 && ! this.cash_msg ) {
+      this->cashLow();
+    } else if( this.balance > 6000 && this.loan > 0 && ! this.cash_ms ) {
+      this.world.ui.adviser->say(_A.warnings.pay_back_loan);
+    }
+    this.cash_msg = true;
+  }
+  // Pay interest on loans
+  if( math.round(this.acc_loan_interest) > 0 ) {
+    this->spendMoney(math.round(this.acc_loan_interest), _S.transactions.loan_interest);
+    this.acc_loan_interest = 0;
+  }
+  // Pay overdraft charges
+  if( math.round(this.acc_overdraft) > 0 ) {
+    this->spendMoney(math.round(this.acc_overdraft), _S.transactions.overdraft);
+    this.acc_overdraft = 0;
+  }
+  // Pay research costs
+  if( math.round(this.acc_research_cost) > 0 ) {
+    this->spendMoney(math.round(this.acc_research_cost), _S.transactions.research);
+    this.acc_research_cost = 0;
+  }
+  // add to score each month
+  // rate varies on some performance factors i.e. reputation above 500 increases the score
+  // and the number of deaths will reduce the score.
+  var sal_inc = this.salary_incr / 10;
+  var sal_mult = (this.reputation - 500) / (this.num_deaths + 1); // added 1 so that you don't divide by 0
+  var month_incr = sal_inc + sal_mult;
+  // To ensure that you can't receive less than 50 or
+  // more than 300 per month
+  if( month_incr < this.sal_min ) {
+    month_incr = this.sal_min;
+  } else if( month_incr > this.salary_incr ) {
+    month_incr = this.salary_incr;
+  }
+  this.player_salary = this.player_salary + math.ceil(month_incr);
+
+  // TODO: do you get interest on the balance owed?
+  for( i, company in ipairs(this.insurance_balance) ) {
+    // Get the amount that is about to be paid to the player
+    var payout_amount = company[3];
+    if( payout_amount > 0 ) {
+      var str = _S.transactions.insurance_colon .. " " .. this.insurance[i];
+      this->receiveMoney(payout_amount, str);
+    }
+    // Shift the amounts to the left
+    table.remove(company, 3);
+    table.insert(company, 1, 0); // The new month have no payments yet
+  }
+
+  // Check for equipment getting available
+  this.research->checkAutomaticDiscovery(this.world->date()->monthOfGame());
+
+  // Add some interesting statistics.
+  this.statistics[this.world->date()->monthOfGame() + 1] = {
+    money_in = this.money_in,
+    money_out = this.money_out,
+    wages = wages,
+    balance = this.balance,
+    visitors = this.num_visitors,
+    cures = this.num_cured,
+    deaths = this.num_deaths,
+    reputation = this.reputation,
+  };
+  this.money_in = 0;
+  this.money_out = 0;
+
+  // make players aware of the need for a receptionist and desk.
+  if( (this->isPlayerHospital() && ! this->hasStaffedDesk()) && this.world->date()->year() == 1 ) {
+    if( this.receptionist_count != 0 && current_month > 2 && ! this.receptionist_msg ) {
+      this.world.ui.adviser->say(_A.warnings.no_desk_6);
+      this.receptionist_msg = true;
+    } else if( this.receptionist_count == 0 && current_month > 2 && this.world.object_counts["reception_desk"] != 0  ) {
+      this.world.ui.adviser->say(_A.warnings.no_desk_7);
+    //  self.receptionist_msg = true
+    } else if( current_month == 3 ) {
+      this.world.ui.adviser->say(_A.warnings.no_desk, true);
+    } else if( current_month == 8 ) {
+      this.world.ui.adviser->say(_A.warnings.no_desk_1, true);
+    } else if( current_month == 11 ) {
+      if( this.visitors == 0 ) {
+        this.world.ui.adviser->say(_A.warnings.no_desk_2, true);
+      } else {
+        this.world.ui.adviser->say(_A.warnings.no_desk_3, true);
+      }
+    }
+  }
+}
+
+//! Returns whether this hospital is controlled by a real person or not.
+function Hospital::isPlayerHospital() {
+  return this == this.world->getLocalPlayerHospital();
+}
+
+//! Does the hospital have a working reception?
+//!return (bool) Whether there is a working reception in the hospital.
+function Hospital::hasStaffedDesk() {
+  for( _, desk in ipairs(this->findReceptionDesks()) ) {
+    if( desk.receptionist || desk.reserved_for ) { return true; }
+  }
+  return false;
+}
+
+//! Collect the reception desks in the hospital.
+//!return (list) The reception desks in the hospital.
+function Hospital::findReceptionDesks() {
+  var reception_desks = {};
+  for( _, obj_list in pairs(this.world.objects) ) {
+    for( _, obj in ipairs(obj_list) ) {
+      if( obj.object_type.id == "reception_desk" ) {
+        reception_desks[#reception_desks + 1] = obj;
+      }
+    }
+  }
+  return reception_desks;
+}
+
+//! Called at the end of each year
+function Hospital::onEndYear() {
+  this.sodas_sold = 0;
+  this.num_vips_ty  = 0;
+  this.num_deaths_this_year = 0;
+  this->checkReputation();
+
+  // On third year of level 3 there is the large increase to salary
+  // this will replicate that. I have still to check other levels above 5 to
+  // see if there are other large increases.
+  // TODO Hall of fame and shame
+  if( this.world->date()->year() == 3 && this.world.map.level_number == 3 ) {
+    // adds the extra to salary in level 3 year 3
+    this.player_salary = this.player_salary + math.random(8000,20000);
+  }
+}
+
+// Creates complete emergency with patients, what disease they have, what's needed
+// to cure them and the fax.
+function Hospital::createEmergency(emergency) {
+  var created_one = false;
+  var random_disease = this.world.available_diseases[math.random(1, #this.world.available_diseases)];
+  var disease = TheApp.diseases[random_disease.id];
+  var number = math.random(2, disease.emergency_number);
+  if( this->getHeliportSpawnPosition() && this->hasStaffedDesk() ) {
+    if( ! emergency ) {
+      // Create a random emergency if parameters are not specified already.
+      emergency = {
+        disease = disease,
+        victims = number,
+        bonus = 1000,
+        percentage = 0.75,
+        killed_emergency_patients = 0,
+        cured_emergency_patients = 0,
+      };
+    }
+
+    this.emergency = emergency;
+    // The last room in the list of treatment rooms is considered when checking for availability.
+    // It works for all original diseases, but if we introduce new multiple room diseases it might break.
+    // TODO: Make it work for all kinds of lists of treatment rooms.
+    // TODO: Change to make use of Hospital:checkDiseaseRequirements
+    var no_rooms = #emergency.disease.treatment_rooms;
+    var room_name, required_staff, staff_name =
+      this.world->getRoomNameAndRequiredStaffName(emergency.disease.treatment_rooms[no_rooms]);
+
+    var staff_available = this->hasStaffOfCategory(required_staff);
+    // Check so that all rooms in the list are available
+    if( this->hasRoomOfType(emergency.disease.treatment_rooms[no_rooms]) ) {
+      room_name = null;
+    }
+    var added_info = _S.fax.emergency.cure_possible;
+    // TODO: Differentiate if a drug is needed, add drug effectiveness. Add undiscovered treatment.
+    // added_info = _S.fax.emergency.cure_not_possible
+    if( room_name ) {
+      if( staff_available ) {
+        added_info = _S.fax.emergency.cure_not_possible_build->format(room_name) .. ".";
+      } else {
+        added_info = _S.fax.emergency.cure_not_possible_build_and_employ->format(room_name, staff_name) .. ".";
+      }
+    } else if( ! staff_available ) {
+      added_info = _S.fax.emergency.cure_not_possible_employ->format(staff_name) .. ".";
+    }
+
+    var one_or_many_victims_msg;
+    if( emergency.victims == 1 ) {
+      one_or_many_victims_msg = _S.fax.emergency.num_disease_singular->format(emergency.disease.name);
+    } else {
+      one_or_many_victims_msg = _S.fax.emergency.num_disease->format(emergency.victims, emergency.disease.name);
+    }
+    var message = {
+      {text = _S.fax.emergency.location->format(_S.fax.emergency.locations[math.random(1,9)])},
+      {text = one_or_many_victims_msg },
+      {text = added_info},
+      {text = this.world.free_build_mode && _S.fax.emergency.free_build || _S.fax.emergency.bonus->format(emergency.bonus*emergency.victims)},
+      choices = {
+        {text = _S.fax.emergency.choices.accept, choice = "accept_emergency"},
+        {text = _S.fax.emergency.choices.refuse, choice = "refuse_emergency"},
+      },
+    };
+    this.world.ui.bottom_panel->queueMessage("emergency", message, null, 24*20, 2); // automatically refuse after 20 days
+    created_one = true;
+  }
+  return created_one;
+}
+
+// Called when the timer runs out during an emergency or when all emergency patients are cured or dead.
+function Hospital::resolveEmergency() {
+  var emer = this.emergency;
+  var rescued_patients = emer.cured_emergency_patients;
+  for( _, patient in ipairs(this.emergency_patients) ) {
+    if( patient && ! patient.cured && ! patient.dead && ! patient->getRoom() ) {
+      patient->die();
+    }
+  }
+  var total = emer.victims;
+  var max_bonus = emer.bonus * total;
+  var emergency_success = rescued_patients/total >= emer.percentage;
+  var earned = 0;
+  if( emergency_success ) {
+    earned = emer.bonus * rescued_patients;
+  }
+  var message = {
+    {text = _S.fax.emergency_result.saved_people
+      ->format(rescued_patients, total)},
+    {text = this.world.free_build_mode && "" || _S.fax.emergency_result.earned_money->format(max_bonus, earned)},
+    choices = {
+      {text = _S.fax.emergency_result.close_text, choice = "close"},
+    },
+  };
+  this.world.ui.bottom_panel->queueMessage("report", message, null, 24*25, 1);
+  if( emergency_success ) { // Reputation increased
+    this->changeReputation("emergency_success", emer.disease);
+    this->receiveMoney(earned, _S.transactions.emergency_bonus);
+  } else { // Too few rescued, reputation hit
+    this->changeReputation("emergency_failed", emer.disease);
+  }
+
+  //check if there's a VIP in the building, and if there is then let him know the outcome
+  for( _, e in ipairs(this.world.entities) ) {
+    if( class.is(e, Vip) ) {
+      e->evaluateEmergency(emergency_success);
+    }
+  }
+
+  this.world->nextEmergency();
+}
+
+//! Determine if all of the patients in the emergency have been cured or killed.
+//! If they have end the emergency timer.
+function Hospital::checkEmergencyOver() {
+  var killed = this.emergency.killed_emergency_patients;
+  var cured = this.emergency.cured_emergency_patients;
+  if( killed + cured >= this.emergency.victims ) {
+    var window = this.world.ui->getWindow(UIWatch);
+    if( window ) {
+      window->onCountdownEnd();
+    }
+  }
+}
+
+// Creates VIP and sends a FAX to query the user.
+function Hospital::createVip() {
+  var vipName =  _S.vip_names[math.random(1,10)];
+  var message = {
+    {text = _S.fax.vip_visit_query.vip_name->format(vipName)},
+    choices = {{text = _S.fax.vip_visit_query.choices.invite, choice = "accept_vip", additionalInfo = {name=vipName}},
+               {text = _S.fax.vip_visit_query.choices.refuse, choice = "refuse_vip", additionalInfo = {name=vipName}}}
+  };
+  // auto-refuse after 20 days
+  this.world.ui.bottom_panel->queueMessage("personality", message, null, 24*20, 2);
+}
+
+/* Creates a new epidemic by creating a new contagious patient with
+ a random disease - this is NOT typically how epidemics are started (mainly for cheat use)
+ see @Hospital:determineIfContagious() to see how epidemics are typically started*/
+function Hospital::spawnContagiousPatient() {
+  /* Gets the available non-visual disease in the current world
+    @return non_visuals (table) table of available non-visual diseases*/
+  var function get_avaliable_contagious_diseases() {
+    var contagious = {};
+    for( _, disease in ipairs(this.world.available_diseases) ) {
+      if( disease.contagious ) {
+          contagious[#contagious + 1] = disease;
+      }
+    }
+    return contagious;
+  }
+
+  if( this->hasStaffedDesk() ) {
+    var patient = this.world->newEntity("Patient", 2);
+    var contagious_diseases = get_avaliable_contagious_diseases();
+    if( #contagious_diseases > 0 ) {
+      var disease = contagious_diseases[math.random(1,#contagious_diseases)];
+      patient->setDisease(disease);
+      //Move the first patient closer (FOR TESTING ONLY)
+      var x,y = this->getHeliportSpawnPosition();
+      patient->setTile(x,y);
+      patient->setHospital(this);
+      this->addToEpidemic(patient);
+    } else {
+      print("Cannot create epidemic - no contagious diseases available");
+    }
+  } else {
+    print("Cannot create epidemic - no staffed reception desk");
+  }
+}
+
+function Hospital::countEpidemics() {
+  // Count the current epidemic if it exists
+  var epidemic_count = this.epidemic && 1 || 0;
+  epidemic_count = epidemic_count + #this.future_epidemics_pool;
+  return epidemic_count;
+}
+
+/* Make the active epidemic (if exists) and any future epidemics tick. If there
+is no current epidemic determines if any epidemic in the pool of future
+epidemics can become the active one. Also removes any epidemics from the
+future pool which have no infected patients and thus, will have no effect on
+the hospital. */
+function Hospital::manageEpidemics() {
+  /* Can the future epidemic be revealed to the player
+  @param future_epidemic (Epidemic) the epidemic to attempt to reveal
+  @return true if can be revealed false otherwise (boolean) */
+  var function can_be_revealed(epidemic) {
+    return ! this.world.ui->getWindow(UIWatch) &&
+    ! this.epidemic && epidemic.ready_to_reveal;
+  }
+
+  var current_epidemic = this.epidemic;
+  if((current_epidemic) ) {
+    current_epidemic->tick();
+  }
+
+  if( this.future_epidemics_pool ) {
+    for( i, future_epidemic in ipairs(this.future_epidemics_pool) ) {
+      if( future_epidemic->hasNoInfectedPatients() ) {
+        table.remove(this.future_epidemics_pool,i);
+      } else if( can_be_revealed(future_epidemic) ) {
+        this.epidemic = future_epidemic;
+        this.epidemic->revealEpidemic();
+        table.remove(this.future_epidemics_pool,i);
+      } else {
+        future_epidemic->tick();
+      }
+    }
+  }
+}
+
+/* Determines if a patient is contagious and then attempts to add them the
+ appropriate epidemic if so.
+ @param patient (Patient) patient to determine if contagious*/
+function Hospital::determineIfContagious(patient) {
+  if( patient.is_emergency || ! patient.disease.contagious ) {
+    return false;
+  }
+  // ContRate treated like a percentage with ContRate% of patients with
+  // a disease having the contagious strain
+  var level_config = this.world.map.level_config;
+  var disease = patient.disease;
+  var contRate = level_config.expertise[disease.expertise_id].ContRate || 0;
+
+  // The patient is potentially contagious as we do not yet know if there
+  // is a suitable epidemic which they can belong to
+  var potentially_contagious = contRate > 0 && (math.random(1,contRate) == contRate);
+  // The patient isn't contagious if these conditions aren't passed
+  var reduce_months = level_config.ReduceContMonths || 14;
+  var reduce_people = level_config.ReduceContPeepCount || 20;
+  var date_in_months = this.world->date()->monthOfGame();
+
+  if( potentially_contagious && date_in_months > reduce_months &&
+      this.num_visitors > reduce_people ) {
+    this->addToEpidemic(patient);
+  }
+}
+
+/* Determines if there is a suitable epidemic the contagious patient can
+ belong to and adds them to it if possible. N.B. a patient isn't actually
+ contagious until they belong to an epidemic. So if it isn't possible to add a
+ patient to an epidemic they are just treated as a normal patient.
+ @param patient (Patient) patient to attempt to add to an epidemic  */
+function Hospital::addToEpidemic(patient) {
+  var epidemic = this.epidemic;
+  // Don't add a new contagious patient if the player is trying to cover up
+  // an existing epidemic - not really fair
+  if( epidemic && ! epidemic.coverup_in_progress &&
+      (patient.disease == epidemic.disease) ) {
+    epidemic->addContagiousPatient(patient);
+  } else if( this.future_epidemics_pool &&
+      ! (epidemic && epidemic.coverup_in_progress) ) {
+    var added = false;
+    for( _, future_epidemic in ipairs(this.future_epidemics_pool) ) {
+      if( future_epidemic.disease == patient.disease ) {
+        future_epidemic->addContagiousPatient(patient);
+        added = true;
+        break;
+      }
+    }
+
+    if( ! added ) {
+      // Make a new epidemic as one doesn't exist with this disease, but only if
+      // we haven't reach the concurrent epidemic limit
+      if( this->countEpidemics() < this.concurrent_epidemic_limit ) {
+        var new_epidemic = Epidemic(this, patient);
+        this.future_epidemics_pool[#this.future_epidemics_pool + 1] = new_epidemic;
+      }
+    }
+  }
+}
+
+
+function Hospital::spawnPatient() {
+  this.world->spawnPatient(this);
+}
+
+function Hospital::removeDebugPatient(patient) {
+  for( i, p in ipairs(this.debug_patients) ) {
+    if( p == patient ) {
+      table.remove(this.debug_patients, i);
+      return;
+    }
+  }
+}
+
+var debug_n;
+function Hospital::getDebugPatient() {
+  if( ! debug_n || debug_n >= #this.debug_patients ) {
+    debug_n = 1;
+  } else {
+    ++debug_n    ;
+  }
+  return this.debug_patients[debug_n];
+}
+
+/* Returns how much a given object currently costs to purchase. The cost
+may be affected by research progress.
+
+!param name (string) The name (id) of the object to investigate.
+*/
+function Hospital::getObjectBuildCost(name) {
+  // Everything is free in free build mode.
+  if( this.world.free_build_mode ) { return 0; }
+
+  var progress = this.research.research_progress;
+  var cfg_objects = this.world.map.level_config.objects;
+  var obj_def = TheApp.objects[name];
+  // Get how much this item costs at the start of the level.
+  var obj_cost = cfg_objects[obj_def.thob].StartCost;
+  // Some objects might have got their cost reduced by research.
+  if( progress[obj_def] ) {
+    obj_cost = progress[obj_def].cost;
+  }
+  return obj_cost;
+}
+
+/* Lowers the player's money by the given amount and logs the transaction.
+
+!param amount (integer) The (positive) amount to spend.
+!param reason (string) A string that shows what happened. Should be one of the strings
+in _S.transactions.
+!param changeValue (integer) The (positive) amount the hospital value should be increased
+*/
+function Hospital::spendMoney(amount, reason, changeValue) {
+  if( ! this.world.free_build_mode ) {
+    this.balance = this.balance - amount;
+    this->logTransaction({spend = amount, desc = reason});
+    this.money_out = this.money_out + amount;
+    if( changeValue ) {
+      this.value = this.value + changeValue;
+    }
+  }
+}
+
+/* Increases the player's money by the given amount and logs the transaction.
+
+!param amount (integer) The (positive) amount to receive.
+!param reason (string) A string that tells what happened. Should be one of the strings
+in _S.transactions.
+!param changeValue (integer) The (positive) amount the hospital value should be decreased
+*/
+function Hospital::receiveMoney(amount, reason, changeValue) {
+  if( ! this.world.free_build_mode ) {
+    this.balance = this.balance + amount;
+    this->logTransaction({receive = amount, desc = reason});
+    this.money_in = this.money_in + amount;
+    if( changeValue ) {
+      this.value = this.value - changeValue;
+    }
+  }
+}
+
+/* Determines how much the player should receive after a patient is treated in a room.
+
+!param patient (Patient) The patient that just got treated.
+*/
+function Hospital::receiveMoneyForTreatment(patient) {
+  if( ! this.world.free_build_mode ) {
+    var disease_id = patient->getTreatmentDiseaseId();
+    if( disease_id == null ) { return; }
+    var casebook = this.disease_casebook[disease_id];
+    var reason;
+    if( casebook.pseudo ) {
+      reason = _S.transactions.treat_colon .. " " .. casebook.disease.name;
+    } else {
+      reason = _S.transactions.cure_colon .. " " .. casebook.disease.name;
+    }
+    var amount = this->getTreatmentPrice(disease_id);
+
+    // 25% of the payments now go through insurance
+    if( patient.insurance_company ) {
+      this->addInsuranceMoney(patient.insurance_company, amount);
+    } else {
+      // patient is paying normally (but still, he could feel like it's
+      // under- or over-priced and it could impact happiness and reputation)
+      this->computePriceLevelImpact(patient, casebook);
+      this->receiveMoney(amount, reason);
+    }
+    casebook.money_earned = casebook.money_earned + amount;
+    patient.world->newFloatingDollarSign(patient, amount);
+  }
+}
+
+//! Sell a soda to a patient.
+//!param patient (patient) The patient buying the soda.
+function Hospital::sellSodaToPatient(patient) {
+  this->receiveMoneyForProduct(patient, 20, _S.transactions.drinks);
+  this.sodas_sold = this.sodas_sold + 1;
+}
+
+//! Function to determine the price for a treatment, modified by reputation and percentage
+// Treatment charge should never be less than the starting price if reputation falls below 500
+function Hospital::getTreatmentPrice(disease) {
+  var reputation = this.disease_casebook[disease].reputation || this.reputation;
+  var percentage = this.disease_casebook[disease].price;
+  var raw_price  = this.disease_casebook[disease].disease.cure_price;
+  if( reputation >= 500 ) {
+    return math.ceil(raw_price * (reputation / 500) * percentage);
+  } else {
+    return math.ceil(raw_price * percentage);
+  }
+}
+
+function Hospital::addInsuranceMoney(company, amount) {
+  var old_balance = this.insurance_balance[company][1];
+  this.insurance_balance[company][1] = old_balance + amount;
+}
+
+function Hospital::receiveMoneyForProduct(patient, amount, reason) {
+  patient.world->newFloatingDollarSign(patient, amount);
+  this->receiveMoney(amount, reason);
+}
+
+//! Pay drug if drug has been purchased to treat a patient.
+//!param disease_id Disease that was treated.
+function Hospital::paySupplierForDrug(disease_id) {
+  var drug_amount = this.disease_casebook[disease_id].drug_cost || 0;
+  if( drug_amount != 0 ) {
+    var str = _S.drug_companies[math.random(1, 5)];
+    this->spendMoney(drug_amount, _S.transactions.drug_cost .. ": " .. str);
+  }
+}
+
+/* Add a transaction to the hospital's transaction log.
+!param transaction (table) A table containing a string field called `desc`, and
+at least one of the following integer fields: `spend`, `receive`.
+*/
+function Hospital::logTransaction(transaction) {
+  transaction.balance = this.balance;
+  transaction.day = this.world->date()->dayOfMonth();
+  transaction.month = this.world->date()->monthOfYear();
+  while( #this.transactions > 20 ) {
+    this.transactions[#this.transactions] = null;
+  }
+  table.insert(this.transactions, 1, transaction);
+}
+
+//! Initialize hospital staff from the level config.
+function Hospital::initStaff() {
+  var level_config = this.world.map.level_config;
+  if( level_config.start_staff ) {
+    for( _, conf in ipairs(level_config.start_staff) ) {
+      var profile;
+      var skill = 0;
+      var added_staff = true;
+      if( conf.Skill ) {
+        skill = conf.Skill / 100;
+      }
+
+      if( conf.Nurse == 1 ) {
+        profile = StaffProfile(this.world, "Nurse", _S.staff_class["nurse"]);
+        profile->init(skill);
+      } else if( conf.Receptionist == 1 ) {
+        profile = StaffProfile(this.world, "Receptionist", _S.staff_class["receptionist"]);
+        profile->init(skill);
+      } else if( conf.Handyman == 1 ) {
+        profile = StaffProfile(this.world, "Handyman", _S.staff_class["handyman"]);
+        profile->init(skill);
+      } else if( conf.Doctor == 1 ) {
+        profile = StaffProfile(this.world, "Doctor", _S.staff_class["doctor"]);
+
+        var shrink = 0;
+        var rsch = 0;
+        var surg = 0;
+        var jr, cons;
+
+        if( conf.Shrink == 1 ) { shrink = 1; }
+        if( conf.Surgeon == 1 ) { surg = 1; }
+        if( conf.Researcher == 1 ) { rsch = 1; }
+
+        if( conf.Junior == 1 ) { jr = 1;
+        } else if( conf.Consultant == 1 ) { cons = 1;
+        }
+        profile->initDoctor(shrink,surg,rsch,jr,cons,skill);
+      } else {
+        added_staff = false;
+      }
+      if( added_staff ) {
+        var staff = this.world->newEntity("Staff", 2);
+        staff->setProfile(profile);
+        // TODO: Make a somewhat "nicer" placing algorithm.
+        staff->setTile(this.world.map.th->getCameraTile(1));
+        staff->onPlaceInCorridor();
+        this.staff[#this.staff + 1] = staff;
+        staff->setHospital(this);
+      }
+    }
+  }
+}
+
+
+function Hospital::addStaff(staff) {
+  this.staff[#this.staff + 1] = staff;
+  // Cost of hiring staff:
+  this->spendMoney(staff.profile.wage, _S.transactions.hire_staff .. ": " .. staff.profile.name);
+}
+
+function Hospital::addPatient(patient) {
+  this.patients[#this.patients + 1] = patient;
+  // Add to the hospital's visitor count
+  this.num_visitors = this.num_visitors + 1;
+  this.num_visitors_ty = this.num_visitors_ty + 1;
+
+  // Decide if the patient belongs in an epidemic
+  this->determineIfContagious(patient);
+}
+
+function Hospital::humanoidDeath(humanoid) {
+  this.num_deaths = this.num_deaths + 1;
+  this.num_deaths_this_year = this.num_deaths_this_year + 1;
+
+  this->changeReputation("death", humanoid.disease);
+  this->updatePercentages();
+}
+
+//! Checks if the hospital employs staff of a given category.
+//!param category (string) A humanoid_class or one of the specialists, i.e.
+//! "Doctor", "Nurse", "Handyman", "Receptionist", "Psychiatrist",
+//! "Surgeon", "Researcher" or "Consultant"
+//! returns false if none, else number of that type employed
+function Hospital::hasStaffOfCategory(category) {
+  var result = false;
+  for( _, staff in ipairs(this.staff) ) {
+    if( staff.humanoid_class == category ) {
+      result = (result || 0) + 1;
+    } else if( staff.humanoid_class == "Doctor" ) {
+      if( (category == "Psychiatrist" && staff.profile.is_psychiatrist >= 1.0) ||
+          (category == "Surgeon" && staff.profile.is_surgeon >= 1.0) ||
+          (category == "Researcher" && staff.profile.is_researcher >= 1.0) ||
+          (category == "Consultant" && staff.profile.is_consultant) ) {
+        result = (result || 0) + 1;
+      }
+    }
+  }
+  return result;
+}
+
+//! Checks if the hospital has a room of a given type.
+//!param type (string) A room_info.id, e.g. "ward".
+//! Returns false if none, else number of that type found
+function Hospital::hasRoomOfType(type) {
+  // Check how many rooms there are.
+  var result = false;
+  for( _, room in pairs(this.world.rooms) ) {
+    if( room.hospital == this && room.room_info.id == type && room.is_active ) {
+      result = (result || 0) + 1;
+    }
+  }
+  return result;
+}
+
+//! Remove the first entry with a given value from a table.
+//! Only works reliably for lists.
+//!param t Table to search for the value, and update.
+//!param value Value to search and remove.
+//!return Whether the value was removed.
+var function RemoveByValue(t, value) {
+  for( i, v in ipairs(t) ) {
+    if( v == value ) {
+      table.remove(t, i);
+      return true;
+    }
+  }
+  return false;
+}
+
+//! Remove a staff member from the hospital staff.
+//!param staff (Staff) Staff member to remove.
+function Hospital::removeStaff(staff) {
+  RemoveByValue(this.staff, staff);
+}
+
+//! Remove a patient from the hospital.
+//!param patient (Patient) Patient to remove.
+function Hospital::removePatient(patient) {
+  RemoveByValue(this.patients, patient);
+}
+
+// TODO: This should depend on difficulty and level
+var reputation_changes = {
+  ["cured"]  =  1, // a patient was successfully treated
+  ["death"]  = -4, // a patient died due to bad treatment or waiting too long
+  ["kicked"] = -3, // firing a staff member OR sending a patient home
+  ["emergency_success"] = 15,
+  ["emergency_failed"] = -20,
+  ["over_priced"] = -2,
+  ["under_priced"] = 1,
+};
+
+//! Normally reputation is changed based on a reason, and the affected
+//! disease also has its own reputation meter.
+//!param reason (string) The reason for changing reputation, for example "cured" or "death".
+//!param disease The disease, if any, that should be affected.
+//!param valueChange (integer) In some cases, for example at year end, the amount varies a lot.
+// Then it is specified here.
+function Hospital::changeReputation(reason, disease, valueChange) {
+  var amount;
+  if( reason == "autopsy_discovered" ) {
+    var rep_hit_perc = this.world.map.level_config.gbv.AutopsyRepHitPercent;
+    amount = rep_hit_perc && math.floor(-this.reputation * rep_hit_perc / 100) || -70;
+  } else if( valueChange ) {
+    amount = valueChange;
+  } else {
+    amount = reputation_changes[reason];
+  }
+  if( this->isReputationChangeAllowed(amount) ) {
+    this.reputation = this.reputation + amount;
+  }
+  if( disease ) {
+    var casebook = this.disease_casebook[disease.id];
+    casebook.reputation = casebook.reputation + amount;
+  }
+  if( this.reputation < this.reputation_min ) {
+    this.reputation = this.reputation_min;
+  } else if( this.reputation > this.reputation_max ) {
+    this.reputation = this.reputation_max;
+  }
+  // Check if criteria for trophy is still met
+  if( this.reputation_above_threshold ) { this->checkReputation(); }
+}
+
+//! Check whether the reputation is still above the treshold.
+function Hospital::checkReputation() {
+  var level_config = this.world.map.level_config;
+  if( level_config.awards_trophies ) {
+    var min_repuration = level_config.awards_trophies.Reputation;
+    this.reputation_above_threshold = min_repuration < this.reputation;
+    return;
+  }
+  this.reputation_above_threshold = false;
+}
+
+//! Decide whether a reputation change is effective or not. As we approach 1000,
+//! a gain is less likely. As we approach 0, a loss is less likely.
+//! Under 500, a gain is always effective.  Over 500, a loss is always effective.
+//!param amount (int): The amount of reputation change.
+function Hospital::isReputationChangeAllowed(amount) {
+  if( (amount > 0 && this.reputation <= 500) || (amount < 0 && this.reputation >= 500) || (amount == 0) ) {
+    return true;
+  } else {
+    return math.random() <= this->getReputationChangeLikelihood();
+  }
+}
+
+//! Compute the likelihood for a reputation change to be effective.
+//! Likelihood gets smaller as hospital reputation gets closer to extreme values.
+//!return (float) Likelihood of a reputation change.
+function Hospital::getReputationChangeLikelihood() {
+  // The result follows a quadratic function, for a curved and smooth evolution.
+  // If reputation == 500, the result is 100%.
+  // Between [380-720], the result is still over 80%.
+  // At 100 or 900, it's under 40%.
+  // At 0 or 1000, it's 0%.
+  //
+  // The a, b and c coefficients have been computed to include points
+  // (x=0, y=1), (x=500, y=0) and (x=1000, y=1) where x is the current
+  // reputation and y the likelihood of the reputation change to be
+  // refused, based a discriminant (aka "delta") == 0
+  var a = 0.000004008;
+  var b = 0.004008;
+  var c = 1;
+
+  var x = this.reputation;
+
+  // The result is "reversed" for more readability
+  return 1 - (a * x * x - b * x + c);
+}
+
+//! Update the 'cured' counts of the hospital.
+//!param patient Patient that was cured.
+function Hospital::updateCuredCounts(patient) {
+  if( ! patient.is_debug ) {
+    this->changeReputation("cured", patient.disease);
+  }
+
+  if( this.num_cured < 1 ) {
+    this.world.ui.adviser->say(_A.information.first_cure);
+  }
+  this.num_cured = this.num_cured + 1;
+  this.num_cured_ty = this.num_cured_ty + 1;
+
+  var casebook = this.disease_casebook[patient.disease.id];
+  casebook.recoveries = casebook.recoveries + 1;
+
+  if( patient.is_emergency ) {
+    this.emergency.cured_emergency_patients = this.emergency.cured_emergency_patients + 1;
+  }
+}
+
+//! Update the 'not cured' counts of the hospital.
+//!param patient Patient that was not cured.
+//!param reason (string) the reason why the patient is not cured.
+//! -"kicked": Patient goes home early (manually sent, no treatment room, etc).
+//! -"over_priced": Patient considers the price too high.
+function Hospital::updateNotCuredCounts(patient, reason) {
+  if( patient.is_debug ) { return; }
+
+  this->changeReputation(reason, patient.disease);
+  this.not_cured = this.not_cured + 1;
+  this.not_cured_ty = this.not_cured_ty + 1;
+
+  if( reason == "kicked" ) {
+    var casebook = this.disease_casebook[patient.disease.id];
+    casebook.turned_away = casebook.turned_away + 1;
+  }
+}
+
+function Hospital::updatePercentages() {
+  var killed = this.num_deaths / (this.num_cured + this.num_deaths) * 100;
+  this.percentage_killed = math.round(killed);
+  var cured = this.num_cured / (this.num_cured + this.not_cured + this.num_deaths) * 100;
+  this.percentage_cured = math.round(cured);
+}
+
+//! Compute average of an attribute for all patients in the hospital.
+//!param attribute (str) Name of the attribute.
+//!param default_value Value to return if there are no patients.
+//!return Average value of the attribute for all hospital patients, or the default value.
+function Hospital::getAveragePatientAttribute(attribute, default_value) {
+  var sum = 0;
+  var count = 0;
+  for( _, patient in ipairs(this.patients) ) {
+    // Some patients (i.e. Alien) may not have the attribute in question, so check for that
+    if( patient.attributes[attribute] ) {
+      sum = sum + patient.attributes[attribute];
+      ++count    ;
+    }
+  }
+
+  if( count == 0 ) {
+    return default_value;
+  } else {
+    return sum / count;
+  }
+}
+
+//! Compute average of an attribute for all staff in the hospital.
+//!param attribute (str) Name of the attribute.
+//!param default_value Value to return if there is no staff.
+//!return Average value of the attribute for all staff, or the default value.
+function Hospital::getAverageStaffAttribute(attribute, default_value) {
+  var sum = 0;
+  var count = 0;
+  for( _, staff in ipairs(this.staff) ) {
+    sum = sum + staff.attributes[attribute];
+    ++count    ;
+  }
+
+  if( count == 0 ) {
+    return default_value;
+  } else {
+    return sum / count;
+  }
+}
+
+//! Checks if the requirements for the given disease are met in the hospital and returns the ones missing.
+//!param disease (String) The disease to check the requirements for
+//! returns false if all requirements are met, else a table in the form
+//! { rooms = {[room1], [room2], ...}, staff = {[humanoid_class] = [amount_needed] or nil} }
+//! i.e. a list of rooms (ordered the same as disease.treatment_rooms), and a set of humanoid_classes with
+//! the needed amount of that class as the value
+function Hospital::checkDiseaseRequirements(disease) {
+  // Copy rooms list from disease but leave out the ones that are present in the hospital
+  // Get required staff from all rooms required by the disease, if not already present in hospital
+  var rooms = {};
+  var staff = {};
+  var any = false;
+  for( _, room_id in ipairs(this.world.available_diseases[disease].treatment_rooms) ) {
+    var found = this->hasRoomOfType(room_id);
+    if( ! found ) {
+      rooms[#rooms + 1] = room_id;
+      any = true;
+    }
+
+    // Get staff for room
+    for( staff_class, amount in pairs(TheApp.rooms[room_id].required_staff) ) {
+      var available = this->hasStaffOfCategory(staff_class) || 0;
+      if( available < amount ) {
+        // Don't add up the staff requirements of different rooms, but take the maximum
+        staff[staff_class] = math.max(staff[staff_class] || 0, amount - available);
+        any = true;
+      }
+    }
+  }
+  // False if no rooms and no staff were added
+  return any && {rooms = rooms, staff = staff};
+}
+
+//! Get the set of walls around a tile position.
+//!param x (int) X position of the queried tile.
+//!param y (int) Y position of the queried tile.
+//!return (table {wall, parcel}) The walls around the given position.
+function Hospital::getWallsAround(x, y) {
+  var map = this.world.map;
+  var th = map.th;
+
+  var _, nw, ww;
+  var walls = {}; // List of {wall="north"/"west"/"south"/"east", parcel}
+  var flags = th->getCellFlags(x, y);
+
+  _, nw, ww = th->getCell(x, y); // floor, north wall, west wall
+  if( ww != 0 ) {
+    walls[#walls + 1] = {wall = "west", parcel = flags.parcelId};
+  }
+  if( nw != 0 ) {
+    walls[#walls + 1] = {wall = "north",  parcel = flags.parcelId};
+  }
+
+  if( x != map.width ) {
+    _, _, ww = th->getCell(x + 1, y);
+    if( ww != 0 ) {
+      walls[#walls + 1] = {wall = "east", parcel = flags.parcelId};
+    }
+  }
+
+  if( y != map.height ) {
+    _, nw, _ = th->getCell(x, y + 1);
+    if( nw != 0 ) {
+      walls[#walls + 1] = {wall = "south", parcel = flags.parcelId};
+    }
+  }
+
+  return walls;
+}
+
+//! Test for the given position to be inside the given rectangle.
+//!param x (int) X position to test.
+//!param y (int) Y position to test.
+//!param rect (table x, y, width, height) Rectangle to check against.
+//!return (bool) Whether the position is inside the rectangle.
+var function isInside(x, y, rect) {
+  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+}
+
+//! Find all ratholes that match the `to_match` criteria.
+//!param holes (list ratholes) Currently existing holes.
+//!param to_match (table) For each direction a rectangle with matching tile positions.
+//!return (list) Matching ratholes.
+var function findMatchingRatholes(holes, to_match) {
+  var matched = {};
+  for( _, hole in ipairs(holes) ) {
+    if( isInside(hole.x, hole.y, to_match[hole.wall]) ) { table.insert(matched, hole); }
+  }
+  return matched;
+}
+
+//! Remove the ratholes that use the walls of the provided room.
+//!param room (Room) Room being de-activated.
+function Hospital::removeRatholesAroundRoom(room) {
+  var above_rect = {x = room.x, width = room.width, y = room.y - 1,          height = 1};
+  var below_rect = {x = room.x, width = room.width, y = room.y +room.height, height = 1};
+  var left_rect  = {x = room.x - 1,          width = 1, y = room.y, height = room.height};
+  var right_rect = {x = room.x + room.width, width = 1, y = room.y, height = room.height};
+
+  var to_delete = {east = left_rect, west = right_rect, south = above_rect, north = below_rect};
+
+  var remove_holes = findMatchingRatholes(this.ratholes, to_delete);
+  for( _, hole in ipairs(remove_holes) ) { this->removeRathole(hole); }
+}
+
+// Add a rathole to the room.
+//!param x (int) X position of the tile containing the rathole.
+//!param y (int) Y position of the tile containing the rathole.
+//!param wall (string) Wall containing the hole (north, west, south, east)
+//!param parcel (int) Parcel number of the xy position.
+function Hospital::addRathole(x, y, wall, parcel) {
+  for( _, rathole in ipairs(this.ratholes) ) {
+    if( rathole.x == x && rathole.y == y && rathole.wall == wall ) { return; }
+  }
+
+  var hole = {x = x, y = y, wall = wall, parcel = parcel};
+  if( wall == "north" || wall == "west" ) {
+    // Only add a rat-hole graphics object for the visible holes.
+    hole["object"] = this.world->newObject("rathole", hole.x, hole.y, hole.wall);
+  }
+  table.insert(this.ratholes, hole);
+}
+
+//! Remove the provided rathole.
+//!param hole (table{x, y, wall, optional object}) Hole to remove.
+function Hospital::removeRathole(hole) {
+  for( i, rathole in ipairs(this.ratholes) ) {
+    if( rathole.x == hole.x && rathole.y == hole.y && rathole.wall == hole.wall ) {
+      table.remove(this.ratholes, i);
+      if( rathole.object ) {
+        this.world->destroyEntity(rathole.object);
+      }
+
+      break;
+    }
+  }
+}
+
+//! Remove any rathole from the given position.
+//!param x X position of the tile that should not have ratholes.
+//!param y Y position of the tile that should not have ratholes.
+function Hospital::removeRatholeXY(x, y) {
+  for( i = #this.ratholes, 1, -1 ) {
+    var rathole = this.ratholes[i];
+    if( rathole.x == x && rathole.y == y ) {
+      table.remove(this.ratholes, i);
+      if( rathole.object ) { this.world->destroyEntity(rathole.object); }
+    }
+  }
+}
+
+class ("AIHospital") (Hospital);
+
+//-@type AIHospital
+var AIHospital = _G["AIHospital"];
+
+function AIHospital::AIHospital(competitor, ...) {
+  this->Hospital(...);
+  if( _S.competitor_names[competitor] ) {
+    this.name = _S.competitor_names[competitor];
+  } else {
+    this.name = "NONAME";
+  }
+  this.is_in_world = false;
+}
+
+function AIHospital::spawnPatient() {
+  // TODO: Simulate patient
+}
+
+function AIHospital::logTransaction() {
+  // AI doesn't need a log of transactions, as it is only used for UI purposes
+}
+
+function Hospital::addHandymanTask(object, taskType, priority, x, y, call) {
+  var parcelId = this.world.map.th->getCellFlags(x, y).parcelId;
+  var subTable = this->findHandymanTaskSubtable(taskType);
+  table.insert(subTable, {["object"] = object, ["priority"] = priority, ["tile_x"] = x, ["tile_y"] = y, ["parcelId"] = parcelId, ["call"] = call});
+}
+
+function Hospital::modifyHandymanTaskPriority(taskIndex, newPriority, taskType) {
+  if( taskIndex != -1 ) {
+    var subTable = this->findHandymanTaskSubtable(taskType);
+    subTable[taskIndex].priority = newPriority;
+  }
+}
+
+function Hospital::removeHandymanTask(taskIndex, taskType) {
+  if( taskIndex != -1 ) {
+    var subTable = this->findHandymanTaskSubtable(taskType);
+    var task = subTable[taskIndex];
+    table.remove(subTable, taskIndex);
+    if( task.assignedHandyman ) {
+      if( task.object.ticks != true ) {
+        task.assignedHandyman->interruptHandymanTask();
+      }
+    }
+  }
+}
+
+function Hospital::findHandymanTaskSubtable(taskType) {
+  for( i = 1, #this.handymanTasks ) {
+    if( this.handymanTasks[i].taskType == taskType ) {
+      return this.handymanTasks[i].subTable;
+    }
+  }
+  table.insert(this.handymanTasks, {["taskType"] = taskType, ["subTable"] = {}});
+  return this->findHandymanTaskSubtable(taskType);
+}
+
+function Hospital::getTaskObject(taskIndex, taskType) {
+  return this->findHandymanTaskSubtable(taskType)[taskIndex];
+}
+
+function Hospital::assignHandymanToTask(handyman, taskIndex, taskType) {
+  if( taskIndex != -1 ) {
+    var subTable = this->findHandymanTaskSubtable(taskType);
+    if( ! subTable[taskIndex].assignedHandyman ) {
+      subTable[taskIndex].assignedHandyman = handyman;
+    } else {
+      var formerHandyman = subTable[taskIndex].assignedHandyman;
+      subTable[taskIndex].assignedHandyman = handyman;
+      formerHandyman->interruptHandymanTask();
+    }
+  }
+}
+
+function Hospital::searchForHandymanTask(handyman, taskType) {
+  var subTable = this->findHandymanTaskSubtable(taskType);
+  //if a distance is smaller than this value stop the search to
+  //save performance
+  var thresholdForStopping = 3;
+  var first, dist, index, priority, multiplier = true, 0, -1, 0, 1;
+  if( handyman.profile.is_consultant ) {
+    multiplier = 0.5;
+  } else if( handyman.profile.is_junior ) {
+    multiplier = 2;
+  }
+  if( ! handyman.parcelNr ) {
+    handyman.parcelNr = 0;
+  }
+  for( i, v in ipairs(subTable) ) {
+    var distance = this.world->getPathDistance(v.tile_x, v.tile_y, handyman.tile_x, handyman.tile_y);
+    var canContinue = true;
+    if( ! first && v.priority < priority ) {
+      canContinue = false;
+    }
+    if( ! v.parcelId ) {
+       v.parcelId = this.world.map.th->getCellFlags(v.tile_x, v.tile_y).parcelId;
+    }
+    if( handyman.parcelNr != 0 && handyman.parcelNr != v.parcelId ) {
+      canContinue = false;
+    }
+    if( distance == false ) {
+      canContinue = false;
+    }
+    if( canContinue ) {
+      if( v.assignedHandyman ) {
+        if( v.assignedHandyman.fired ) {
+          v.assignedHandyman = null;
+        } else if( ! v.assignedHandyman.hospital ) {
+          // This should normally never be the case. If the handyman doesn't belong to a hsopital
+          // then they should not have any tasks assigned to them however it was previously possible
+          // We need to tidy up to make sure the task can be reassigned.
+          print("Warning: Orphaned handyman is still assigned a task. Removing.");
+          v.assignedHandyman = null;
+        } else {
+          var assignedDistance = this.world->getPathDistance(v.tile_x, v.tile_y, v.assignedHandyman.tile_x, v.assignedHandyman.tile_y);
+          if( assignedDistance != false ) {
+            if( v.assignedHandyman.profile.is_consultant ) {
+              assignedDistance /=   2;
+            } else if( v.assignedHandyman.profile.is_junior ) {
+              assignedDistance *=   2;
+            }
+            distance *=   multiplier;
+            if( distance + 5 > assignedDistance ) {
+              canContinue = false;
+            } else {
+              distance /=   multiplier;
+            }
+          }
+        }
+      }
+      if( canContinue ) {
+        if( first ) {
+          if( distance <= thresholdForStopping ) {
+            return i;
+          }
+          first, dist, index, priority = false, distance, i, v.priority;
+        } else if(  priority < v.priority || distance < dist ) {
+          if( distance < thresholdForStopping ) {
+            return i;
+          }
+          dist, index, priority = distance, i, v.priority;
+        }
+      }
+    }
+  }
+  return index;
+}
+
+//! Find a handyman task by task type, position, and possibly the used object.
+//!param x (int) The X coordinate of the position.
+//!param y (int) The Y coordinate of the position.
+//!param taskType Type of the task.
+//!param obj (Object) If specified, the object used for doing the task.
+//! Since multiple litter objects may exist at the same tile, the object must be given when cleaning.
+function Hospital::getIndexOfTask(x, y, taskType, obj) {
+  var subTable = this->findHandymanTaskSubtable(taskType);
+  for( i, v in ipairs(subTable) ) {
+    if( v.tile_x == x && v.tile_y == y && (obj == null || v.object == obj) ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+//! Afterload function to initialize the owned plots.
+function Hospital::initOwnedPlots() {
+  this.ownedPlots = {};
+  for( _, v in ipairs(this.world.entities) ) {
+    if( v.tile_x && v.tile_y ) {
+      var parcel = this.world.map.th->getCellFlags(v.tile_x, v.tile_y).parcelId;
+      var isAlreadyContained = false;
+      for( _, v2 in ipairs(this.ownedPlots) ) {
+        if( parcel == v2 ) {
+          isAlreadyContained = true;
+          break;
+        }
+      }
+      if( isAlreadyContained == false && parcel != 0 && this.world.map.th->getPlotOwner(parcel) != 0  ) {
+        table.insert(this.ownedPlots, parcel);
+      }
+    }
+  }
+}
+
+//! Function that returns true if the room for the given disease
+//! has not been researched yet.
+//! param disease (string): the disease to be checked.
+function Hospital::roomNotYetResearched(disease) {
+  var req = this->checkDiseaseRequirements(disease);
+  if( type(req) == "table" && #req.rooms > 0 ) {
+    for( _, room_id in ipairs(req.rooms) ) {
+      if( ! this.discovered_rooms[this.world.available_rooms[room_id]] ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+//! Function that returns true if concentrating research on the disease is possible.
+//! @param disease (string): the disease to be checked.
+function Hospital::canConcentrateResearch(disease) {
+  var book = this.disease_casebook;
+  if( ! book[disease].pseudo && this->roomNotYetResearched(disease) ) {
+    return true;
+  }
+  if( book[disease].drug ) {
+    return book[disease].cure_effectiveness < 100;
+  }
+  var room;
+  if( book[disease].pseudo ) {
+    room = book[disease].disease.id->sub(6);
+  } else {
+    room = book[disease].disease.treatment_rooms[#book[disease].disease.treatment_rooms];
+  }
+  var research_progress = this.research.research_progress;
+  var object_type;
+  for( obj, _ in pairs(this.world.available_rooms[room].objects_needed) ) {
+    if( this.world.object_types[obj].default_strength ) {
+      object_type = obj;
+      break;
+    }
+  }
+
+  if( object_type ) {
+    var progress = research_progress[this.world.object_types[object_type]];
+    return progress.start_strength < this.world.map.level_config.gbv.MaxObjectStrength;
+  }
+  return false;
+}
+
+//! Change patient happiness and hospital reputation based on price distortion.
+//! The patient happiness is adjusted proportionally. The hospital reputation
+//! can only be affected when the distortion level reaches some threshold.
+//!param patient (patient) The patient paying the bill. His/her happiness level
+//! is adjusted.
+//!param casebook (object) Disease casebook entry. It's used to display the
+//! localised disease name when Adviser tells the warning message.
+function Hospital::computePriceLevelImpact(patient, casebook) {
+  var price_distortion = patient->getPriceDistortion(casebook);
+  patient->changeAttribute("happiness", -(price_distortion / 2));
+
+  if( price_distortion < this.under_priced_threshold ) {
+    if( math.random(1, 100) == 1 ) {
+      this.world.ui.adviser->say(_A.warnings.low_prices->format(casebook.disease.name));
+      this->changeReputation("under_priced");
+    }
+  } else if( price_distortion > this.over_priced_threshold ) {
+    if( math.random(1, 100) == 1 ) {
+      this.world.ui.adviser->say(_A.warnings.high_prices->format(casebook.disease.name));
+      this->changeReputation("over_priced");
+    }
+  } else if( math.abs(price_distortion) <= 0.15 && math.random(1, 200) == 1 ) {
+    // When prices are well adjusted (i.e. abs(price distortion) <= 0.15)
+    this.world.ui.adviser->say(_A.warnings.fair_prices->format(casebook.disease.name));
+  }
+}

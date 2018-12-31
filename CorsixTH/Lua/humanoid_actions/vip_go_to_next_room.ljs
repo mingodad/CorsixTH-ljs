@@ -1,0 +1,74 @@
+/* Copyright (c) 2012 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("VipGoToNextRoomAction") (HumanoidAction);
+
+//-@type VipGoToNextRoomAction
+var VipGoToNextRoomAction = _G["VipGoToNextRoomAction"];
+
+function VipGoToNextRoomAction::VipGoToNextRoomAction() {
+  this->HumanoidAction("vip_go_to_next_room");
+}
+
+var action_vip_go_to_next_room_end = permanent("action_next_room_end")( function(humanoid) { });
+
+var function action_vip_go_to_next_room_start(action, humanoid) {
+  if( humanoid.next_room_no == null ) {
+    // This vip is done here.
+    humanoid->goHome();
+  } else {
+    // Walk to the entrance of the room and stay there for a while.
+    var x, y = humanoid.next_room->getEntranceXY();
+    var callback = /*persistable:vip_next_room_enroute_cancel*/ function() {
+      humanoid->setNextAction(IdleAction());
+      humanoid.waiting = 1;
+    };
+    humanoid->queueAction(WalkAction(x, y));
+    // What happens if the room disappears:
+    humanoid.next_room.humanoids_enroute[humanoid] = {callback = callback};
+
+    // Evaluation function
+    var /*persistable:vip_next_room_eval*/ function evaluate() {
+      // First remove the VIP from the humanoids_enroute list.
+      humanoid.next_room.humanoids_enroute[humanoid] = null;
+      //humanoid.next_room.door.reserved_for = humanoid
+      humanoid->evaluateRoom();
+      humanoid.waiting = 3;
+    }
+    // Find direction to look at
+    var ix, iy = humanoid.next_room->getEntranceXY(true);
+    var dir = "north";
+    if( iy > y ) {
+      dir = "south";
+    } else if( iy == y ) {
+      if( ix < x ) {
+        dir = "west";
+      } else {
+        dir = "east";
+      }
+    }
+    humanoid->queueAction(IdleAction()->setLoopCallback(evaluate)->setDirection(dir));
+
+    // Finish this action and start the above sequence.
+    humanoid->finishAction();
+  }
+}
+
+return action_vip_go_to_next_room_start;

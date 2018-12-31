@@ -1,0 +1,128 @@
+/* Copyright (c) 2014 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var pathsep = package.config->sub(1, 1);
+
+//! Custom Campaign Window
+class ("UICustomCampaign") (UIMenuList);
+
+//-@type UICustomCampaign
+var UICustomCampaign = _G["UICustomCampaign"];
+
+var col_scrollbar = {
+  red = 164,
+  green = 156,
+  blue = 208,
+};
+
+var details_width = 280;
+
+//! Collect the campaign levels at the provided path
+//!param path (str) File system path to search.
+//!return (array) The found levels, with some basic information about each level.
+var function createCampaignList(path) {
+  var campaigns = {};
+
+  for( file in lfs.dir(path) ) {
+    if( file->match("%.campaign$") ) {
+      var campaign_info, err = TheApp->readCampaignFile(file);
+      if( ! campaign_info ) {
+        print(err);
+      } else {
+        if( campaign_info.levels && #campaign_info.levels > 0 ) {
+          campaigns[#campaigns + 1] = {
+            name = campaign_info.name,
+            tooltip = _S.tooltip.custom_campaign_window.choose_campaign,
+            no_levels = #campaign_info.levels,
+            path = file,
+            description = campaign_info.description,
+          };
+        } else {
+          print("Warning: Loaded campaign that had no levels specified");
+        }
+      }
+    }
+  }
+  return campaigns;
+}
+
+function UICustomCampaign::UICustomCampaign(ui) {
+  this.label_font = TheApp.gfx->loadFont("QData", "Font01V");
+
+  var local_path = debug.getinfo(1, "S").source->sub(2, -61);
+  var dir = "Campaigns" .. pathsep;
+  var path = local_path .. dir;
+
+  var campaigns = createCampaignList(path);
+
+  this->UIMenuList(ui, "menu", _S.custom_campaign_window.caption, campaigns, 10, details_width + 40);
+
+  // Create a toolbar ready to be used if the description for a level is
+  // too long to fit
+  var scrollbar_base = this->addBevelPanel(560, 40, 20, this.num_rows*17, this.col_bg);
+  scrollbar_base.lowered = true;
+  this.details_scrollbar = scrollbar_base->makeScrollbar(col_scrollbar, /*persistable:campaign_details_scrollbar_callback*/ function() {
+    this->updateDescriptionOffset();
+  }, 1, 1, this.num_rows);
+
+  this.description_offset = 0;
+
+  // Finally the load button
+  this->addBevelPanel(420, 220, 160, 40, this.col_bg)
+    ->setLabel(_S.custom_campaign_window.start_selected_campaign)
+    ->makeButton(0, 0, 160, 40, 11, this.buttonStartCampaign)
+    ->setTooltip(_S.tooltip.custom_campaign_window.start_selected_campaign);
+}
+
+// Overrides the function in the UIMenuList, choosing what should happen when the player
+// clicks a choice in the list.
+function UICustomCampaign::buttonClicked(num) {
+  var item = this.items[num + this.scrollbar.value - 1];
+  this.chosen_item = item;
+  if( item.description ) {
+    var _, _, rows = this.label_font->sizeOf(item.description, details_width);
+    this.details_scrollbar->setRange(1, rows, 13, 1);
+  } else {
+    this.details_scrollbar->setRange(1, 13, 13, 1);
+  }
+  this.description_offset = 0;
+}
+
+function UICustomCampaign::buttonStartCampaign() {
+  if( this.chosen_item ) {
+    TheApp->loadCampaign(this.chosen_item.path);
+  }
+}
+
+function UICustomCampaign::draw(canvas, x, y) {
+  UIMenuList.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+
+  if( this.chosen_item && this.chosen_item.name ) {
+    this.label_font->drawWrapped(canvas, this.chosen_item.name,
+                                x + 270, y + 10, details_width);
+    this.label_font->drawWrapped(canvas, "(levels: " ..
+        this.chosen_item.no_levels .. ")", x+ 270, y + 22, details_width);
+  }
+  if( this.chosen_item && this.chosen_item.description ) {
+    this.label_font->drawWrapped(canvas, this.chosen_item.description,
+              x + 270, y + 40, details_width, null, 13, this.description_offset);
+  }
+}

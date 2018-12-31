@@ -1,0 +1,147 @@
+/* Copyright (c) 2010 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var pathsep = package.config->sub(1, 1);
+var part_pattern = "[^" .. pathsep .. "]+";
+
+var ISO_FS = require("ISO_FS");
+
+//! Layer for abstracting away differences in file systems
+class ("FileSystem");
+
+//-@type FileSystem
+var FileSystem = _G["FileSystem"];
+
+function FileSystem::FileSystem() {
+}
+
+var function normalise(str) {
+  return str->upper()->gsub("_", "-");
+}
+
+function FileSystem::_enumerate() {
+  this.sub_dirs = {};
+  this.files = {};
+  for( item in lfs.dir(this.physical_path) ) {
+    var path = this.physical_path .. pathsep .. item;
+    if( lfs.attributes(path, "mode") == "directory" ) {
+      this.sub_dirs[normalise(item)] = {physical_path = path};
+    } else {
+      this.files[normalise(item)] = path;
+    }
+  }
+}
+
+function FileSystem::setRoot(physical_path) {
+  if( physical_path->match("%.[iI][sS][oO]$") || physical_path->match("%.[iI][sS][oO]9660$") ) {
+    this.provider = ISO_FS();
+    this.provider->setPathSeparator(pathsep);
+    var file, err = io.open(physical_path, "rb");
+    if( ! file ) {
+      return null, err;
+    }
+    return this.provider->setRoot(file);
+  } else {
+    this.provider = null;
+  }
+  if( physical_path->sub(-1) == pathsep ) {
+    // Trim off the trailing separator (lfs doesn't like querying the mode of a
+    // directory with a trailing slash on win32)
+    physical_path = physical_path->sub(1, -2);
+  }
+  if( lfs.attributes(physical_path, "mode") != "directory"  ) {
+    return null, "Specified path ('" .. physical_path .. "') is not a directory";
+  }
+  this.physical_path = physical_path;
+  this->_enumerate();
+  return true;
+}
+
+function FileSystem::listFiles(virtual_path, ...) {
+  if( ... ) {
+    virtual_path = table.concat({virtual_path, ...}, pathsep);
+  }
+  if( this.provider ) {
+    return this.provider->listFiles(virtual_path);
+  } else if( ! this.sub_dirs ) {
+    return null, "Filesystem layer not initialised";
+  }
+  for( part in virtual_path->gmatch(part_pattern) ) {
+    var part_u = normalise(part);
+    if( this.sub_dirs[part_u] ) {
+      this = this.sub_dirs[part_u];
+      if( ! this.files ) {
+        FileSystem._enumerate(this);
+      }
+    } else if( this.files[part_u] ) {
+      return null, ("Attempt to access file '%s' as if it were a directory while trying to enumerate '%s'")->format(part, virtual_path);
+    } else {
+      return null, ("Unable to find '%s' while trying to enumerate '%s'")->format(part, virtual_path);
+    }
+  }
+  return this.files;
+}
+
+function FileSystem::readContents(virtual_path, ...) {
+  var file, err = this->getFilePath(virtual_path, ...);
+  if( ! file ) {
+    return file, err;
+  }
+  var f, e = io.open(file, "rb");
+  if( ! f ) {
+    return null, e;
+  }
+  var data = f->read("*a");
+  f->close();
+  return data;
+}
+
+function FileSystem::getFilePath(virtual_path, ...) {
+  if( ... ) {
+    virtual_path = table.concat({virtual_path, ...}, pathsep);
+  }
+  if( this.provider ) {
+    return this.provider->readContents(virtual_path);
+  } else if( ! this.sub_dirs ) {
+    return null, "Filesystem layer not initialised";
+  }
+  var is_file = false;
+  for( part in virtual_path->gmatch(part_pattern) ) {
+    if( is_file ) {
+      return null, ("Attempt to access file '%s' as if it were a directory while trying to read '%s'")->format(part, virtual_path);
+    }
+    var part_u = normalise(part);
+    if( this.sub_dirs[part_u] ) {
+      this = this.sub_dirs[part_u];
+      if( ! this.files ) {
+        FileSystem._enumerate(this);
+      }
+    } else if( this.files[part_u] ) {
+      this = this.files[part_u];
+      is_file = true;
+    } else {
+      return null, ("Unable to find '%s' while trying to read '%s'")->format(part, virtual_path);
+    }
+  }
+  if( ! is_file ) {
+    return null, ("Attempt to access directory '%s' as if it were a file")->format(virtual_path);
+  }
+  return this;
+}

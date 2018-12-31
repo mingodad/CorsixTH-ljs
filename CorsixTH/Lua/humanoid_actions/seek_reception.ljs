@@ -1,0 +1,114 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("SeekReceptionAction") (HumanoidAction);
+
+//-@type SeekReceptionAction
+var SeekReceptionAction = _G["SeekReceptionAction"];
+
+function SeekReceptionAction::SeekReceptionAction() {
+  this->HumanoidAction("seek_reception");
+}
+
+var function can_join_queue_at(humanoid, x, y) {
+  var flag_cache = humanoid.world.map.th->getCellFlags(x, y);
+  return flag_cache.hospital && ! flag_cache.room &&
+      humanoid.hospital &&
+      flag_cache.owner == humanoid.hospital->getPlayerIndex();
+}
+
+var function action_seek_reception_start(action, humanoid) {
+  var world = humanoid.world;
+  var best_desk;
+  var score;
+
+  assert(humanoid.hospital, "humanoid must be associated with a hospital to seek reception");
+
+  // Go through all receptions desks.
+  for( _, desk in ipairs(humanoid.hospital->findReceptionDesks()) ) {
+    if( (! desk.receptionist && ! desk.reserved_for) ) {
+      // Not an allowed reception desk to go to.
+    } else {
+
+      // Ok, so we found one.
+      // Is this one better than the last one?
+      // A lower score is better.
+      // First find out where the usage tile is.
+      var orientation = desk.object_type.orientations[desk.direction];
+      var x = desk.tile_x + orientation.use_position[1];
+      var y = desk.tile_y + orientation.use_position[2];
+      var this_score = humanoid.world->getPathDistance(humanoid.tile_x, humanoid.tile_y, x, y);
+
+      this_score = this_score + desk->getUsageScore();
+      if( ! score || this_score < score ) {
+        // It is better, or the first one!
+        score = this_score;
+        best_desk = desk;
+      }
+    }
+  }
+  if( best_desk ) {
+    // We found a desk to go to!
+    var orientation = best_desk.object_type.orientations[best_desk.direction];
+    var x = best_desk.tile_x + orientation.use_position[1];
+    var y = best_desk.tile_y + orientation.use_position[2];
+    humanoid->updateDynamicInfo(_S.dynamic_info.patient.actions.on_my_way_to
+      ->format(best_desk.object_type.name));
+    humanoid.waiting = null;
+
+    // We don't want patients which have just spawned to be joining the queue
+    // immediately, so walk them closer to the desk before joining the queue
+    if( can_join_queue_at(humanoid, humanoid.tile_x, humanoid.tile_y) ) {
+      var face_x, face_y = best_desk->getSecondaryUsageTile();
+      humanoid->setNextAction(QueueAction(x, y, best_desk.queue)->setMustHappen(action.must_happen)
+          ->setFaceDirection(face_x, face_y));
+    } else {
+      var walk = WalkAction(x, y)->setMustHappen(action.must_happen);
+      humanoid->queueAction(walk, 0);
+
+      // Trim the walk to finish once it is possible to join the queue
+      for( i = #walk.path_x, 2, -1 ) {
+        if( can_join_queue_at(humanoid, walk.path_x[i], walk.path_y[i]) ) {
+          walk.path_x[i + 1] = null;
+          walk.path_y[i + 1] = null;
+        } else {
+          break;
+        }
+      }
+    }
+  } else {
+    // No reception desk found. One will probably be built soon, somewhere in
+    // the hospital, so either walk to the hospital, or walk around the hospital.
+    var procrastination;
+    if( humanoid.hospital->isInHospital(humanoid.tile_x, humanoid.tile_y) ) {
+      procrastination = MeanderAction()->setCount(1)->setMustHappen(action.must_happen);
+      if( ! humanoid.waiting ) {
+        // Eventually people are going to get bored and leave.
+        humanoid.waiting = 5;
+      }
+    } else {
+      var _, hosp_x, hosp_y = world.pathfinder->isReachableFromHospital(humanoid.tile_x, humanoid.tile_y);
+      procrastination = WalkAction(hosp_x, hosp_y)->setMustHappen(action.must_happen);
+    }
+    humanoid->queueAction(procrastination, 0);
+  }
+}
+
+return action_seek_reception_start;

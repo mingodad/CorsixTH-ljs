@@ -1,0 +1,992 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("Room");
+
+//-@type Room
+var Room = _G["Room"];
+
+function Room::Room(x, y, w, h, id, room_info, world, hospital, door, door2) {
+  this.id = id;
+  this.world = world;
+  this.hospital = hospital;
+
+  this.room_info = room_info;
+  this->initRoom(x, y, w, h, door, door2);
+}
+
+function Room::initRoom(x, y, w, h, door, door2) {
+  this.x = x;
+  this.y = y;
+  this.width = w;
+  this.height = h;
+  this.maximum_patients = 1; // A good default for most rooms
+  door.room = this;
+  this.door = door;
+  // If it's a swing door we have two doors
+  this.door2 = door2;
+  if( ! this->hasQueueDialog() ) {
+    door->setDynamicInfo('text', {
+      this.room_info.name
+    });
+  } else {
+    door->setDynamicInfo('text', {
+      this.room_info.name,
+      _S.dynamic_info.object.queue_size->format(0),
+      _S.dynamic_info.object.queue_expected->format(0)
+    });
+  }
+  this.built = false;
+  this.crashed = false;
+
+  this.world.map.th->markRoom(x, y, w, h, this.room_info.floor_tile, this.id);
+
+  this.humanoids = {/*a set rather than a list*/};
+  this.objects = {/*a set rather than a list*/};
+  // the set of humanoids walking to this room
+  this.humanoids_enroute = {/*a set rather than a list*/};
+
+  this.world->prepareRectangleTilesForBuild(this.x, this.y, this.width, this.height);
+}
+
+//! Get the tile next to the door.
+//!param inside (bool) If set, get the tile inside the room, else get the tile outside.
+//!return x,y (tile coordinates) of the tile next to the door.
+function Room::getEntranceXY(inside) {
+  var door = this.door;
+  var x, y = door.tile_x, door.tile_y;
+  if( (inside && this.world->getRoom(x, y) != this) || (! inside && this.world->getRoom(x, y) == this) ) {
+    if( door.direction == "north" ) {
+      --y    ;
+    } else if( door.direction == "west" ) {
+      --x    ;
+    }
+  }
+  return x, y;
+}
+
+//! Construct an 'walk' action to the tile next to the door, just outside the room.
+//!return Action to move to the tile just outside the room.
+function Room::createLeaveAction() {
+  var x, y = this->getEntranceXY(false);
+  return WalkAction(x, y)->setIsLeaving(true)->truncateOnHighPriority();
+}
+
+function Room::createEnterAction(humanoid_entering, callback) {
+  var x, y = this->getEntranceXY(true);
+  if( ! callback ) {
+    if( class.is(humanoid_entering, Patient) ) {
+      callback = /*persistable:room_patient_enroute_cancel*/ function() {
+        humanoid_entering->setNextAction(SeekRoomAction(this.room_info.id));
+      };
+    } else if( class.is(humanoid_entering, Vip) ) {
+      callback = /*persistable:room_vip_enroute_cancel*/ function() {
+        humanoid_entering->setNextAction(IdleAction());
+        humanoid_entering.waiting = 1;
+      };
+    } else {
+      callback = /*persistable:room_humanoid_enroute_cancel*/ function() {
+        humanoid_entering->setNextAction(MeanderAction());
+      };
+    }
+  }
+  if( this.is_active ) {
+    this.humanoids_enroute[humanoid_entering] = {callback = callback};
+  }
+
+  return WalkAction(x, y)->setIsEntering(true);
+}
+
+//! Get a patient in the room.
+//!return A patient (humanoid) if there is a patient, nil otherwise.
+function Room::getPatient() {
+  for( humanoid in pairs(this.humanoids) ) {
+    if( class.is(humanoid, Patient) ) {
+      return humanoid;
+    }
+  }
+}
+
+//! Count the number of patients in the room.
+//!return Number of patients in the room.
+function Room::getPatientCount() {
+  var count = 0;
+  for( humanoid in pairs(this.humanoids) ) {
+    if( class.is(humanoid, Patient) ) {
+      ++count    ;
+    }
+  }
+  return count;
+}
+
+// function that sets a given attribute to a given value for all staff members.
+// Should be overriden for rooms that have more than one staff member.
+function Room::setStaffMembersAttribute(attribute, value) {
+  if( this.staff_member ) {
+    this.staff_member[attribute] = value;
+  }
+}
+
+function Room::dealtWithPatient(patient) {
+  patient = patient || this->getPatient();
+  // If the patient was sent home while in the room, don't
+  // do anything apart from removing any leading idle action.
+  if( ! patient.hospital ) {
+    if( patient->getCurrentAction().name == "idle" ) {
+      patient->finishAction();
+    }
+    return;
+  }
+  patient->setNextAction(this->createLeaveAction());
+  patient->addToTreatmentHistory(this.room_info);
+  if( this.staff_member ) {
+    this->setStaffMembersAttribute("dealing_with_patient", false);
+  }
+
+  if( patient.disease ) {
+    if( ! patient.diagnosed ) {
+      // Patient not yet diagnosed, hence just been in a diagnosis room.
+      // Increment diagnosis_progress, and send patient back to GP.
+
+      patient->completeDiagnosticStep(this);
+      this.hospital->receiveMoneyForTreatment(patient);
+      if( patient->agreesToPay("diag_gp") ) {
+        patient->queueAction(SeekRoomAction("gp"));
+      } else {
+        patient->goHome("over_priced", "diag_gp");
+      }
+    } else {
+      // Patient just been in a cure room, so either patient now cured, or needs
+      // to move onto next cure room.
+      patient.cure_rooms_visited = patient.cure_rooms_visited + 1;
+      var next_room = patient.disease.treatment_rooms[patient.cure_rooms_visited + 1];
+      if( next_room ) {
+        // Do not say that it is a treatment room here, since that check should already have been made.
+        patient->queueAction(SeekRoomAction(next_room));
+      } else {
+        // Patient is "done" at the hospital
+        patient->treatDisease();
+      }
+    }
+  } else {
+    patient->queueAction(MeanderAction()->setCount(2));
+    patient->queueAction(IdleAction());
+  }
+
+  if( this.dealt_patient_callback ) {
+    this.dealt_patient_callback(this.waiting_staff_member);
+  }
+  // The staff member(s) might be needed somewhere else.
+  this->findWorkForStaff();
+}
+
+//! Checks if the room still needs the staff in it and otherwise
+// sends them away if they're needed somewhere else.
+function Room::findWorkForStaff() {
+  // If the staff member is idle we can send him/her somewhere else
+  for( humanoid in pairs(this.humanoids) ) {
+    // Don't check handymen
+    if( class.is(humanoid, Staff) && humanoid.humanoid_class != "Handyman" && humanoid->isIdle() ) {
+      this.world.dispatcher->answerCall(humanoid);
+    }
+  }
+}
+
+var profile_attributes = {
+  Psychiatrist = "is_psychiatrist",
+  Surgeon = "is_surgeon",
+  Researcher = "is_researcher",
+};
+
+// Given any type of staff criteria (required/maximum), subtract the staff in the room and return the result
+function Room::getMissingStaff(criteria) {
+  var result = {};
+  for( attribute, count in pairs(criteria) ) {
+    for( humanoid in pairs(this.humanoids) ) {
+      if( class.is(humanoid, Staff) && humanoid->fulfillsCriterion(attribute) && ! humanoid->isLeaving() && ! humanoid.fired ) {
+        --count    ;
+      }
+    }
+    if( count <= 0 ) {
+      count = null;
+    }
+    result[attribute] = count;
+  }
+  return result;
+}
+
+function Room::testStaffCriteria(criteria, extra_humanoid) {
+  // criteria should be required_staff or maximum_staff table.
+  // if extra_humanoid is nil, then returns true if the humanoids in the room
+  // meet the given criteria, and false otherwise.
+  // if extra_humanoid is not nil, then returns true if the given humanoid
+  // would assist in satisfying the given criteria, and false if they would not.
+  var missing = this->getMissingStaff(criteria);
+
+  if( extra_humanoid ) {
+    var class = extra_humanoid.humanoid_class;
+    if( class == "Surgeon" ) {
+      class = "Doctor";
+    }
+    if( missing[class] ) {
+      return true;
+    }
+    if( class == "Doctor" ) {
+      // check for special proficiencies
+      for( attribute, profile_attribute in pairs(profile_attributes) ) {
+        if( extra_humanoid.profile && extra_humanoid.profile[profile_attribute] == 1.0 && missing[attribute] ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  } else {
+    return next(missing) == null;
+  }
+}
+
+var no_staff = {}; // Constant denoting 'no staff at all' in a room.
+
+//! Get the type and number of maximum staff for the room.
+//!return (table) Type and number of maximum staff.
+function Room::getMaximumStaffCriteria() {
+  // Some rooms have dynamic criteria (i.e. dependent upon the number of items
+  // in the room), so this method is provided for such rooms to override it.
+  return this.room_info.maximum_staff || this.room_info.required_staff || no_staff;
+}
+
+//! Get the type and number of required staff for the room.
+//!return (table) Type and number of required staff.
+function Room::getRequiredStaffCriteria() {
+  return this.room_info.required_staff || no_staff;
+}
+
+function Room::onHumanoidEnter(humanoid) {
+  assert(! this.humanoids[humanoid], "Humanoid entering a room that they are already in");
+
+  humanoid.in_room = this;
+  humanoid.last_room = this; // Remember where the staff was for them to come back after staffroom rest
+  // Do not set humanoids[humanoid] here, because it affect staffFitsInRoom test
+
+  //entering humanoids are no longer enroute
+  if( this.humanoids_enroute[humanoid] ) {
+    this.humanoids_enroute[humanoid] = null; // humanoid is no longer walking to this room
+  }
+
+  // If this humanoid for some strange reason happens to enter a non-active room,
+  // just leave.
+  if( ! this.is_active ) {
+    print('Warning: humanoid entering non-active room');
+    this.humanoids[humanoid] = true;
+    if( class.is(humanoid, Patient) ) {
+      this->makeHumanoidLeave(humanoid);
+      humanoid->queueAction(SeekRoomAction(this.room_info.id));
+    } else {
+      humanoid->setNextAction(this->createLeaveAction());
+      humanoid->queueAction(MeanderAction());
+    }
+    return;
+  }
+  if( humanoid.humanoid_class == "Handyman" ) {
+    // Handymen can always enter a room (to repair stuff, water plants, etc.)
+    this.humanoids[humanoid] = true;
+    // Check for machines which need repair or plants which need watering if
+    // the handyman didn't arrive as a part of a job
+    if( humanoid.on_call ) {
+      assert(humanoid.on_call.object->getRoom() == this, "Handyman arrived is on call but not arriving to the designated room");
+    } else {
+      // If the handyman was not assigned for the job (e.g. drop by manual pickup), do answer a call
+      humanoid->setNextAction(AnswerCallAction());
+    }
+    return;
+  }
+  var msg = {
+    (_A.warnings.researcher_needs_desk_1),
+    (_A.warnings.researcher_needs_desk_2),
+    (_A.warnings.researcher_needs_desk_3),
+  };
+  var msg_nurse = {
+    (_A.warnings.nurse_needs_desk_1),
+    (_A.warnings.nurse_needs_desk_2),
+  };
+  if( class.is(humanoid, Staff) ) {
+    // If the room is already full of staff, or the staff member isn't relevant
+    // to the room, then make them leave. Otherwise, take control of them.
+    if( ! this->staffFitsInRoom(humanoid) ) {
+      if( this->getStaffMember() && this->staffMeetsRoomRequirements(humanoid) ) {
+        var staff_member = this->getStaffMember();
+        this.humanoids[humanoid] = true;
+          if( staff_member.profile.is_researcher && this.room_info.id == "research" ) {
+            this.world.ui.adviser->say(msg[math.random(1, #msg)]);
+          }
+          if( staff_member.humanoid_class == "Nurse" && this.room_info.id == "ward" ) {
+            this.world.ui.adviser->say(msg_nurse[math.random(1, #msg_nurse)]);
+          }
+        if( ! staff_member.dealing_with_patient ) {
+          staff_member->setNextAction(this->createLeaveAction());
+          staff_member->queueAction(MeanderAction());
+          this.staff_member = humanoid;
+          humanoid->setCallCompleted();
+          this->commandEnteringStaff(humanoid);
+        } else {
+          if( this.waiting_staff_member ) {
+            this.waiting_staff_member.waiting_on_other_staff = null;
+            this.waiting_staff_member->setNextAction(this->createLeaveAction());
+            this.waiting_staff_member->queueAction(MeanderAction());
+          }
+          this->createDealtWithPatientCallback(humanoid);
+          humanoid.waiting_on_other_staff = true;
+          humanoid->setNextAction(MeanderAction());
+        }
+      } else {
+        this.humanoids[humanoid] = true;
+        humanoid->setNextAction(this->createLeaveAction());
+        humanoid->queueAction(MeanderAction());
+        humanoid->adviseWrongPersonForThisRoom();
+      }
+    } else {
+      this.humanoids[humanoid] = true;
+      humanoid->setCallCompleted();
+      this->commandEnteringStaff(humanoid);
+    }
+    this->tryAdvanceQueue();
+    return;
+  }
+  this.humanoids[humanoid] = true;
+  this->tryAdvanceQueue();
+  if( class.is(humanoid, Patient) ) {
+    // An infect patient's disease may have changed so they might have
+    // been sent to an incorrect diagnosis room, they should leave and go
+    // back to the gp for redirection
+    if( (humanoid.infected) && ! humanoid.diagnosed &&
+        ! this->isDiagnosisRoomForPatient(humanoid) ) {
+      humanoid->queueAction(this->createLeaveAction());
+      humanoid.needs_redirecting = true;
+      humanoid->queueAction(SeekRoomAction("gp"));
+      return;
+    }
+    // Check if the staff requirements are still fulfilled (the staff might have left / been picked up meanwhile)
+    if( this->testStaffCriteria(this->getRequiredStaffCriteria()) ) {
+      if( this.staff_member  ) {
+        this->setStaffMembersAttribute("dealing_with_patient", true);
+      }
+      this->commandEnteringPatient(humanoid);
+    } else {
+      humanoid->setNextAction(this->createLeaveAction());
+      humanoid->queueAction(this->createEnterAction(humanoid));
+    }
+  }
+}
+
+function Room::createDealtWithPatientCallback(humanoid) {
+  this.dealt_patient_callback = /*persistable:room_dealt_with_patient_callback*/ function (staff_humanoid) {
+    if( ! staff_humanoid.waiting_on_other_staff ) {
+      return;
+    }
+    var staff_member = this->getStaffMember();
+    if( staff_member ) {
+      staff_member->setNextAction(this->createLeaveAction());
+      staff_member->queueAction(MeanderAction());
+      staff_member->setMood("staff_wait", "deactivate");
+      staff_member->setDynamicInfoText("");
+    }
+    staff_humanoid->setCallCompleted();
+    staff_humanoid.waiting_on_other_staff = null;
+    this->commandEnteringStaff(staff_humanoid);
+    this->setStaffMember(staff_humanoid);
+    this.waiting_staff_member = null;
+    this.dealt_patient_callback = null;
+  };
+  this.waiting_staff_member = humanoid;
+}
+
+//! Get the current staff member.
+// Can be overridden in rooms with multiple staff members to return the desired one.
+//!return (staff) The current staff member.
+function Room::getStaffMember() {
+  return this.staff_member;
+}
+
+//! Set the current staff member.
+//!param staff (staff) Staff member to denote as current staff.
+function Room::setStaffMember(staff) {
+  this.staff_member = staff;
+}
+
+//! Does the given staff member fit in the room?
+// Returns false if the room is already full of staff or if the given member of staff cannot help out.
+// Otherwise returns true.
+//!return (bool) True if the staff member can work in the room, else False.
+function Room::staffFitsInRoom(staff) {
+  var criteria = this->getMaximumStaffCriteria();
+  if( this->testStaffCriteria(criteria) || ! this->testStaffCriteria(criteria, staff) ) {
+    return false;
+  }
+  return true;
+}
+
+//! Returns true if the humanoid meets (one of) the required staff criteria of the room
+function Room::staffMeetsRoomRequirements(humanoid) {
+  var criteria = this->getRequiredStaffCriteria();
+  for( attribute, _ in pairs(criteria) ) {
+    if( humanoid->fulfillsCriterion(attribute) ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+//! When a valid member of staff enters the room this function is called.
+// Can be extended in derived classes.
+//!param humanoid The staff in question
+//!param already_initialized If true, this means that the staff has already got order
+// what to do.
+function Room::commandEnteringStaff(humanoid, already_initialized) {
+  if( ! already_initialized ) {
+    this.staff_member = humanoid;
+    humanoid->setNextAction(MeanderAction());
+  }
+  this->tryToFindNearbyPatients();
+  humanoid->setDynamicInfoText("");
+  // This variable is used to avoid multiple calls for staff (sound played only)
+  this.sound_played = null;
+  if( this->testStaffCriteria(this->getRequiredStaffCriteria()) ) {
+    this.world.dispatcher->dropFromQueue(this);
+  }
+}
+
+function Room::commandEnteringPatient(humanoid) {
+  // To be extended in derived classes
+  this.door.queue.visitor_count = this.door.queue.visitor_count + 1;
+  humanoid->updateDynamicInfo("");
+
+  for( room_humanoid in pairs(this.humanoids) ) { // Staff is no longer waiting
+    if( class.is(room_humanoid, Staff) ) {
+      if( room_humanoid.humanoid_class != "Handyman" ) {
+        room_humanoid->setMood("staff_wait", "deactivate");
+        room_humanoid->setDynamicInfoText("");
+      }
+    }
+  }
+}
+
+function Room::tryAdvanceQueue() {
+  if( this.door.queue->size() > 0 && ! this.door.user && ! this.door.reserved_for ) {
+    var front = this.door.queue->front();
+    // These two conditions differ by the waiting symbol
+
+    if( this->canHumanoidEnter(front) ) {
+      this.door.queue->pop();
+      this.door->updateDynamicInfo();
+      // Do nothing if it is the staff room or training room.
+      if( this->hasQueueDialog() ) {
+        for( room_humanoid in pairs(this.humanoids) ) { // Staff is now waiting
+          if( class.is(room_humanoid, Staff) ) {
+            if( room_humanoid.humanoid_class != "Handyman" ) {
+              room_humanoid->setMood("staff_wait", "activate");
+              room_humanoid->setDynamicInfoText(_S.dynamic_info.staff.actions.waiting_for_patient);
+            }
+          }
+        }
+      }
+    } else if( this.humanoids[front] ) {
+      this.door.queue->pop();
+      this.door->updateDynamicInfo();
+    }
+  }
+}
+
+function Room::onHumanoidLeave(humanoid) {
+  if( this.staff_member == humanoid ) {
+    this.staff_member = null;
+  }
+  humanoid.in_room = null;
+  if( ! this.humanoids[humanoid] ) {
+    print("Warning: Humanoid leaving a room that they are not in");
+    return;
+  }
+  this.humanoids[humanoid] = null;
+  var staff_leaving = false;
+
+  if( class.is(humanoid, Patient) ) {
+    // Some staff member in the room might be waiting to get to the staffroom.
+    for( room_humanoid in pairs(this.humanoids) ) {
+      // A patient leaving allows doctors/nurses inside to go to staffroom, if needed
+      // In a rare case a handyman that just decided he wants to go to the staffroom
+      // could be in the room at the same time as a patient leaves.
+      if( class.is(room_humanoid, Staff) && room_humanoid.humanoid_class != "Handyman" ) {
+        if( room_humanoid.staffroom_needed ) {
+          room_humanoid.staffroom_needed = null;
+          room_humanoid->goToStaffRoom();
+          staff_leaving = true;
+        }
+      }
+    }
+    // There might be other similar rooms with patients queueing
+    if( this.door.queue && this.door.queue->reportedSize() == 0 ) {
+      this->tryToFindNearbyPatients();
+    }
+  }
+  if( ! staff_leaving ) {
+    this->tryAdvanceQueue();
+  } else {
+    // Staff is leaving. If there is still a need for this room (people are in the queue) then call
+    // someone new.
+    if( this.active && this.door.queue->patientSize() > 0 ) {
+      // This call might not be effective, if the doctor last action is
+      // walking/must_happen but is_leaving not set (psych likes to walk around in the room)
+      // hence testStaffCriteria still pass.
+      // This is guarded by onHumanoidLeave(Staff)
+      this.world.dispatcher->callForStaff(this);
+    }
+  }
+  if( class.is(humanoid, Staff) ) {
+    if( humanoid.waiting_on_other_staff ) {
+      humanoid.waiting_on_other_staff = null;
+      this.dealt_patient_callback = null;
+    }
+    // Make patients leave the room if there are no longer enough staff
+    if( ! this->testStaffCriteria(this->getRequiredStaffCriteria()) ) {
+      var patient_needs_to_reenter = false;
+      for( room_humanoid in pairs(this.humanoids) ) {
+        if( class.is(room_humanoid, Patient) && this->shouldHavePatientReenter(room_humanoid) ) {
+          this->makeHumanoidLeave(room_humanoid);
+          room_humanoid->queueAction(this->createEnterAction(room_humanoid));
+          patient_needs_to_reenter = true;
+        }
+      }
+      // Call for staff if needed
+      if( this.is_active && (patient_needs_to_reenter || this.door.queue->patientSize() > 0) ) {
+        this.world.dispatcher->callForStaff(this);
+      }
+    }
+    // Remove any unwanted moods the staff member might have
+    humanoid->setMood("staff_wait", "deactivate");
+  }
+
+  // The player might be waiting to edit this room
+  if( ! this.is_active ) {
+    var i = 0;
+    for( _ in pairs(this.humanoids) ) {
+      ++i    ;
+    }
+    if( i == 0 ) {
+      var ui = this.world.ui;
+      ui->addWindow(UIEditRoom(ui, this));
+      ui->setCursor(ui.default_cursor);
+    }
+  }
+}
+
+function Room::shouldHavePatientReenter(patient) {
+  return ! patient->hasLeavingAction();
+}
+
+var tile_factor = 10;     // how many tiles further are we willing to walk for 1 person fewer in the queue
+var readiness_bonus = 50; // how many tiles further are we willing to walk if the room has all the required staff
+
+//! Score function to decide how desirable a room is for a patient.
+//!return (int) The score, lower is better.
+function Room::getUsageScore() {
+  var queue = this.door.queue;
+  var score = queue->patientSize() + this->getPatientCount() - this.maximum_patients;
+  score *=   tile_factor;
+  if( this->testStaffCriteria(this->getRequiredStaffCriteria()) ) {
+    score -=   readiness_bonus;
+  }
+  // Add constant penalty if queue is full
+  if( queue->isFull() ) {
+    score +=   1000;
+  }
+  return score;
+}
+
+function Room::canHumanoidEnter(humanoid) {
+  // If the room is not active nobody can enter
+  if( ! this.is_active ) {
+    return false;
+  }
+  // By default, staff can always enter
+  if( class.is(humanoid, Staff) ) {
+    return true;
+  }
+  // By default, patients can only enter if there are sufficient staff and not
+  // too many patients.
+  if( class.is(humanoid, Patient) && ! this.needs_repair ) {
+    return this->testStaffCriteria(this->getRequiredStaffCriteria()) && this->getPatientCount() < this.maximum_patients;
+  }
+  // By default, other classes of humanoids cannot enter
+  return false;
+}
+
+// Function stub for rooms to implement. Called when the final confirm
+// button has been pressed when building/editing a room.
+function Room::roomFinished() {
+  // True once the room has been finished after initial construction, and then
+  // as long as the user doesn't edit it and go back beyond the first phase (place objects)
+  this.built = true;
+  // Only true when not editing the room at all.
+  this.is_active = true;
+  // Some rooms should not have the door cursor for the queue dialog
+  if( ! this->hasQueueDialog() ) {
+    this.door.hover_cursor = TheApp.gfx->loadMainCursor("default");
+  }
+  // Show information about the room if not already shown.
+  // Also only show them if the player is playing the original campaign.
+  if( tonumber(this.world.map.level_number) && ! this.world.room_information_dialogs_off ) {
+    if( ! this.world.room_built[this.room_info.id] ) {
+      this.world.ui->addWindow(UIInformation(this.world.ui, _S.room_descriptions[this.room_info.id]));
+      this.world.room_built[this.room_info.id] = true;
+    }
+  }
+  this->tryToFindNearbyPatients();
+  // It may also happen that there are patients queueing for this room already (e.g after editing)
+  if( this.door.queue->patientSize() > 0 ) {
+    this.world.dispatcher->callForStaff(this);
+  }
+  this->tryAdvanceQueue();
+}
+
+//! Try to move a patient from the old room to the new room.
+//!param old_room (Room) Room that currently has the patient in the queue.
+//!param new_room (Room) Room that wants the patient in the queue.
+//!param patient (Humanoid) Patient to move.
+//!return (boolean) Whether we are done with the old room (no more patients will come from it).
+var function tryMovePatient(old_room, new_room, patient) {
+  var world = new_room.world;
+
+  var px, py = patient.tile_x, patient.tile_y;
+  // Don't reroute the patient if he just decided to go to the toilet
+  if( patient.going_to_toilet != "no" ) {
+    return false;
+  }
+
+  var new_x, new_y = new_room->getEntranceXY(true);
+  var old_x, old_y = old_room->getEntranceXY(true);
+  var new_distance = world->getPathDistance(px, py, new_x, new_y);
+  if( ! new_distance ) { return true; } // Patient cannot reach us, quit trying
+
+  var new_score = new_room->getUsageScore() + new_distance;
+  var old_score;
+  var old_distance = world->getPathDistance(px, py, old_x, old_y);
+  if( old_distance ) {
+    old_score = old_room->getUsageScore() + old_distance;
+  } else {
+    old_score = new_score + 1; // Make condition below fail.
+  }
+  if( new_score >= old_score ) { return true; }
+
+  // Update the queues
+  var old_queue = old_room.door.queue;
+  old_queue->removeValue(patient);
+  patient.next_room_to_visit = new_room;
+  new_room.door.queue->expect(patient);
+  new_room.door->updateDynamicInfo();
+
+  // Rewrite the action queue
+  for( i, action in ipairs(patient.action_queue) ) {
+    if( i != 1 ) {
+      action.todo_interrupt = true;
+    }
+    // The patient will most likely have a queue action for the other
+    // room that must be cancelled. To prevent the after_use callback
+    // of the drinks machine to enqueue the patient in the other queue
+    // again, is_in_queue is set to false so the callback won't run
+    if( action.name == 'queue' ) {
+      action.is_in_queue = false;
+    } else if( action.name == "walk" && action.x == old_x && action.y == old_y ) {
+      patient->queueAction(new_room->createEnterAction(patient), i);
+      break;
+    }
+  }
+
+  var interrupted = patient->getCurrentAction();
+  var on_interrupt = interrupted.on_interrupt;
+  if( on_interrupt ) {
+    interrupted.on_interrupt = null;
+    on_interrupt(interrupted, patient, false);
+  }
+  return false;
+}
+
+//! Try to find new patients for this room by 'stealing' them from other rooms nearby.
+function Room::tryToFindNearbyPatients() {
+  if( ! this.door.queue ) {
+    return;
+  }
+
+  for( _, old_room in pairs(this.world.rooms) ) {
+    if( old_room.hospital == this.hospital && old_room != this &&
+        old_room.room_info == this.room_info && old_room.door.queue &&
+        old_room.door.queue->reportedSize() >= 2 ) {
+      var old_queue = old_room.door.queue;
+      var pat_number = old_queue->reportedSize();
+      while( pat_number > 1 ) {
+        var patient = old_queue->reportedHumanoid(pat_number);
+        if( tryMovePatient(old_room, this, patient) ) { break; }
+        // tryMovePatient may have just removed patient 'pat_number', but it does
+        // not change the queue in front of it. 'pat_number - 1' thus still exists.
+        --pat_number    ;
+      }
+    }
+  }
+}
+
+//! Explode the room.
+function Room::crashRoom() {
+  this.door->closeDoor();
+  if( this.door2 ) {
+    this.door2.hover_cursor = null;
+  }
+
+  // A patient might be about to use the door (staff are dealt with elsewhere):
+  if( this.door.reserved_for ) {
+    var person = this.door.reserved_for;
+    if( ! person->isLeaving() ) {
+      if( class.is(person, Patient) ) {
+        //Delay so that room is destroyed before the SeekRoom search.
+        person->queueAction(IdleAction()->setCount(1));
+        person->queueAction(SeekRoomAction(this.room_info.id));
+      }
+    }
+    person->finishAction();
+    this.door.reserved_for = null;
+  }
+
+  var remove_humanoid = function(humanoid) {
+    humanoid->queueAction(IdleAction(), 1);
+    humanoid.user_of = null;
+    // Make sure any emergency list is not messed up.
+    // Note that these humanoids might just have been kicked. (No hospital set)
+    if( humanoid.is_emergency ) {
+      table.remove(this.world->getLocalPlayerHospital().emergency_patients, humanoid.is_emergency);
+    }
+    humanoid->die();
+    this.world->destroyEntity(humanoid);
+  };
+
+  // Remove all humanoids in the room
+  for( humanoid, _ in pairs(this.humanoids) ) {
+    remove_humanoid(humanoid);
+  }
+  // There might also be someone using the door, even if that person is just about to exit
+  // he/she is killed too.
+  var walker = this.door.user;
+  if( walker ) {
+    this.door->removeUser(walker);
+    remove_humanoid(walker);
+  }
+
+  // Remove all objects in the room
+  var fx, fy = this->getEntranceXY(true);
+  for( object, _ in pairs(this.world->findAllObjectsNear(fx, fy)) ) {
+    // Machines (i.e. objects with strength) are already done.
+    if( object.object_type.class == "Plant" ) {
+      var index = this.hospital->getIndexOfTask(object.tile_x, object.tile_y, "watering");
+      if( index != -1 ) {
+        this.hospital->removeHandymanTask(index, "watering");
+      }
+      object.unreachable = true;
+    }
+    if( object.object_type.id != "door" && ! object.strength &&
+        object.object_type.class != "SwingDoor" ) {
+      object.user = null;
+      object.user_list = null;
+      object.reserved_for = null;
+      object.reserved_for_list = null;
+      this.world->destroyEntity(object);
+    }
+  }
+
+  var map = this.world.map.th;
+  // TODO: Explosion, animations: 4612, 3280
+
+  // Make every floor tile have soot on them
+  for( x = this.x, this.x + this.width - 1 ) {
+    for( y = this.y, this.y + this.height - 1 ) {
+      var soot = this.world->newObject("litter", x, y);
+      soot->setLitterType("soot_floor", 0);
+    }
+  }
+  // Make walls have soot on them too
+  var ty = this.y;
+  var soot_type, soot, block;
+  for( x = this.x, this.x + this.width - 1 ) {
+    block = map->getCell(x, ty, 2);
+    soot_type = "soot_wall";
+    if( this.world->getWallSetFromBlockId(block) == "window_tiles" ) {
+      soot_type = "soot_window";
+    }
+    soot = this.world->newObject("litter", x, ty);
+    soot->setLitterType(soot_type, 1);
+  }
+  var x = this.x;
+  for( y = this.y, this.y + this.height - 1 ) {
+    block = map->getCell(x, y, 3);
+    soot_type = "soot_wall";
+    if( this.world->getWallSetFromBlockId(block) == "window_tiles" ) {
+      soot_type = "soot_window";
+    }
+    soot = this.world->newObject("litter", x, y);
+    soot->setLitterType(soot_type, 0);
+  }
+
+  this.hospital.num_explosions = this.hospital.num_explosions + 1;
+
+  this.crashed = true;
+  this->deactivate();
+}
+
+// Tells a humanoid in the room to leave it. This can be overridden for special
+// handling, e.g. if the humanoid needs to change before leaving the room.
+function Room::makeHumanoidLeave(patient) {
+  var leave = this->createLeaveAction()->setMustHappen(true);
+  patient->setNextAction(leave);
+}
+
+function Room::makeHumanoidDressIfNecessaryAndThenLeave(humanoid) {
+  if( ! humanoid->isLeaving() ) {
+    var leave = this->createLeaveAction()->setMustHappen(true);
+
+    if( ! string.find(humanoid.humanoid_class, "Stripped") ) {
+      humanoid->setNextAction(leave);
+      return;
+    }
+
+    var screen, sx, sy = this.world->findObjectNear(humanoid, "screen");
+    var use_screen = UseScreenAction(screen)->setMustHappen(true)->setIsLeaving(true);
+
+    //Make old saved game action queues compatible with the changes made by the #293 fix commit:
+    for( actions_index, action in ipairs(humanoid.action_queue) ) {
+      if( action.name == "use screen" || (action.name == "walk" && action.x == sx && action.y == sy) ) {
+        if( ! action.is_leaving ) {
+          humanoid.humanoid_actions[actions_index].is_leaving = true;
+        }
+        if( action.name == "walk" && action.must_happen ) {
+          action.must_happen = false;
+        }
+      }
+    }
+
+    if( humanoid->getCurrentAction().name == "use_screen" ) {
+      //The humanoid must be using the screen to undress because this isn't a leaving action:
+      humanoid->getCurrentAction().after_use = null;
+      humanoid->setNextAction(use_screen);
+    } else {
+      humanoid->setNextAction(WalkAction(sx, sy)->setMustHappen(true)->disableTruncate()->setIsLeaving(true));
+      humanoid->queueAction(use_screen);
+    }
+
+    humanoid->queueAction(leave);
+  }
+}
+
+//! Deactivate the room from the world.
+function Room::deactivate() {
+  this.is_active = false; // So that no more patients go to it.
+  this.world->notifyRoomRemoved(this);
+  for( _, callback in pairs(this.humanoids_enroute) ) {
+    callback.callback();
+  }
+  // Now empty the humanoids_enroute list since they are not enroute anymore.
+  this.humanoids_enroute = {};
+
+  this.hospital->removeRatholesAroundRoom(this);
+}
+
+function Room::tryToEdit() {
+  this->deactivate();
+  var i = 0;
+  // Tell all humanoids that they should leave
+  // If someone is entering the room right now they are also counted.
+  if( this.door.user && this.door.user->getCurrentAction().is_entering ) {
+    i = 1;
+  }
+  for( humanoid, _ in pairs(this.humanoids) ) {
+    if( ! humanoid->isLeaving() ) {
+      if( class.is(humanoid, Patient) ) {
+        this->makeHumanoidLeave(humanoid);
+        humanoid->queueAction(SeekRoomAction(this.room_info.id));
+      } else {
+        humanoid->setNextAction(this->createLeaveAction());
+        humanoid->queueAction(MeanderAction());
+      }
+    }
+    ++i    ;
+  }
+  // If there were no people inside we're ready to edit the room
+  if( i == 0 ) {
+    var ui = this.world.ui;
+    ui->addWindow(UIEditRoom(ui, this));
+    ui->setCursor(ui.default_cursor);
+  }
+}
+
+function Room::hasQueueDialog() {
+  return ! this.room_info.has_no_queue_dialog;
+}
+
+//! Stub to be extended in subclasses, if needed.
+function Room::afterLoad(old, new) {
+  if( old && old < 46 ) {
+    this.humanoids_enroute = {/*a set rather than a list*/};
+  }
+}
+
+/* Is the room one of the diagnosis rooms for the patient?
+-- This used for epidemics when the disease and therefore the diagnosis
+-- rooms of a patient may change.
+-- @param patient (Patient) patient to verify if treatment room */
+// @return result (boolean) true if is suitable diagnosis room, false otherwise
+function Room::isDiagnosisRoomForPatient(patient) {
+  if( this.room_info.id != "gp" ) {
+    for( _, room_name in ipairs(patient.disease.diagnosis_rooms) ) {
+      if( this.room_info.id == room_name ) {
+        return true;
+      }
+    }
+    return false;
+  } else {
+    return true;
+  }
+}
+
+//! Get the average service quality of the staff members in the room.
+//!return (float) [0-1] Average staff service quality.
+function Room::getStaffServiceQuality() {
+  var quality = 0.5;
+
+  if( this.staff_member_set ) {
+    // For rooms with multiple staff member (like operating theatre)
+    quality = 0;
+    var count = 0;
+    for( member, _ in pairs(this.staff_member_set) ) {
+      quality = quality + member->getServiceQuality();
+      ++count    ;
+    }
+
+    quality /=   count;
+  } else if( this.staff_member ) {
+    // For rooms with one staff member
+    quality = this.staff_member->getServiceQuality();
+  }
+
+  return quality;
+}

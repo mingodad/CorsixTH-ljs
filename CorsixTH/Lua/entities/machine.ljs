@@ -1,0 +1,436 @@
+/* Copyright (c) 2009 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var TH = require("TH");
+
+//! An `Object` which needs occasional repair (to prevent explosion).
+class ("Machine") (Object);
+
+//-@type Machine
+var Machine = _G["Machine"];
+
+function Machine::Machine(world, object_type, x, y, direction, etc) {
+
+  this.total_usage = -1; // Incremented in the constructor of Object.
+  this->Object(world, object_type, x, y, direction, etc);
+
+  if( object_type.default_strength ) {
+    // Only for the main object. The slave doesn't need any strength
+    var progress = world.ui.hospital.research.research_progress[object_type];
+    this.strength = progress.start_strength;
+  }
+
+  // We actually don't want any dynamic info just yet
+  this->clearDynamicInfo();
+  // Change hover cursor once the room has been finished.
+  this.waiting_for_finalize = true; // Waiting until the room is completed (reset by new-room callback).
+
+  var orientation = object_type.orientations[direction];
+  var handyman_position = orientation.handyman_position;
+  if( handyman_position ) {
+  // If there are many possible handyman tiles, choose one that is accessible from the use_position.
+    if( type(handyman_position[1]) == "table" ) {
+      for( _, position in ipairs(handyman_position) ) {
+        var hx, hy = x + position[1], y + position[2];
+        var ux, uy = x + orientation.use_position[1], y + orientation.use_position[2];
+        if( world.pathfinder->findDistance(hx, hy, ux, uy) ) {
+          // Also make sure the tile is not in another room or in the corridor.
+          var room = world->getRoom(hx, hy);
+          if( room && room == this->getRoom() ) {
+            this.handyman_position = {position[1], position[2]};
+            break;
+          }
+        }
+      }
+    } else {
+      this.handyman_position = {handyman_position[1], handyman_position[2]};
+    }
+  } else {
+    this.handyman_position = {orientation.use_position[1], orientation.use_position[2]};
+  }
+}
+
+function Machine::notifyNewRoom(room) {
+  if( this.waiting_for_finalize && room.objects[this] ) {
+    this->finalize(room);
+    this.waiting_for_finalize = false;
+  }
+}
+
+function Machine::setCrashedAnimation() {
+  this->setAnimation(this.object_type.crashed_animation);
+}
+
+//! Calculates the number of times the machine can be used before crashing (unless repaired first)
+function Machine::getRemainingUses() {
+  return this.strength - this.times_used;
+}
+
+//! Set whether the smoke animation should be showing
+var function setSmoke(this, isSmoking) {
+  // If turning smoke on for this machine
+  if( isSmoking ) {
+    // If there is no smoke animation for this machine, make one
+    if( ! this.smokeInfo ) {
+      this.smokeInfo = TH.animation();
+      // Note: Set the location of the smoke to that of the machine
+      // rather than setting the machine to the parent so that the smoke
+      // doesn't get hidden with the machine during use
+      this.smokeInfo->setTile(this.th->getTile());
+      // Always show the first smoke layer
+      this.smokeInfo->setLayer(10, 2);
+      // tick to animate over all frames
+      this.ticks = true;
+    }
+    // TODO: select the smoke icon based on the type of machine
+    this.smokeInfo->setAnimation(this.world.anims, 3424);
+  } else { // Otherwise, turning smoke off
+    // If there is currently a smoke animation, remove it
+    if( this.smokeInfo ) {
+      this.smokeInfo->setTile(null);
+    }
+    this.smokeInfo = null;
+  }
+}
+
+//! Call on machine use. Handles crashing the machine & queueing repairs
+function Machine::machineUsed(room) {
+  // Do nothing if the room has already crashed
+  if( room.crashed ) {
+    return;
+  }
+  // Update dynamic info (strength & times used)
+  this->updateDynamicInfo();
+  // How many uses this machine has left until it explodes
+  var threshold = this->getRemainingUses();
+  // Find a queued task for a handyman coming to repair this machine
+  var taskIndex = this.hospital->getIndexOfTask(this.tile_x, this.tile_y, "repairing");
+
+  // Too late it is about to explode
+  if( threshold < 1 ) {
+    // Clean up any task of handyman coming to repair the machine
+    this.hospital->removeHandymanTask(taskIndex, "repairing");
+    // Blow up the room
+    room->crashRoom();
+    this->setCrashedAnimation();
+    // No special cursor required when hovering over the crashed room
+    this.hover_cursor = null;
+    // Clear dynamic info (tracks machine usage which is no longer required)
+    this->clearDynamicInfo();
+    // Prevent the machine from smoking, it's now just a pile of rubble
+    setSmoke(this, false);
+    // If we have the window for this machine open, close it
+    var window = this.world.ui->getWindow(UIMachine);
+    if( window && window.machine == this ) {
+      window->close();
+    }
+    // Clear the icon showing a handyman is coming to repair the machine
+    this->setRepairing(null);
+    return true;
+  // Else if urgent repair needed
+  } else if( threshold < 4 ) {
+    // If the job of repairing the machine isn't queued, queue it now (higher priority)
+    if( taskIndex == -1 ) {
+      var call = this.world.dispatcher->callForRepair(this, true, false, true);
+      this.hospital->addHandymanTask(this, "repairing", 2, this.tile_x, this.tile_y, call);
+    } else { // Otherwise the task is already queued. Increase the priority to above that of machines with at least 4 uses left
+      this.hospital->modifyHandymanTaskPriority(taskIndex, 2, "repairing");
+    }
+  // Else if repair is needed, but not urgently
+  } else if( threshold < 6 ) {
+    // If the job of repairing the machine isn't queued, queue it now (low priority)
+    if( taskIndex == -1 ) {
+      var call = this.world.dispatcher->callForRepair(this);
+      this.hospital->addHandymanTask(this, "repairing", 1, this.tile_x, this.tile_y, call);
+    }
+  }
+
+  // Update whether smoke gets displayed for this machine (and if so, how much)
+  this->calculateSmoke(room);
+}
+
+//! Calculates whether smoke gets displayed for this machine (and if so, how much)
+function Machine::calculateSmoke(room) {
+  // Do nothing if the room has already crashed
+  if( room.crashed ) {
+    return;
+  }
+
+  // How many uses this machine has left until it explodes
+  var threshold = this->getRemainingUses();
+
+  // If now exploding, clear any smoke
+  if( threshold < 1 ) {
+    setSmoke(this, false);
+  // Else if urgent repair needed
+  } else if( threshold < 4 ) {
+    // Display smoke, up to three animations per machine
+    // i.e. < 4 one plume, < 3 two plumes or < 2 three plumes of smoke
+    setSmoke(this, true);
+    // turn on additional layers of the animation for extra smoke plumes, depending on how damaged the machine is
+    if( threshold < 3 ) {
+      this.smokeInfo->setLayer(11, 2);
+    }
+    if( threshold < 2 ) {
+      this.smokeInfo->setLayer(12, 2);
+    }
+  }
+}
+
+function Machine::getRepairTile() {
+  var x = this.tile_x + this.handyman_position[1];
+  var y = this.tile_y + this.handyman_position[2];
+  return x, y;
+}
+
+function Machine::createHandymanActions(handyman) {
+  var ux, uy = this->getRepairTile();
+  var this_room = this->getRoom();
+  var handyman_room = handyman->getRoom();
+  assert(this_room, "machine should always in a room");
+
+  this.repairing = handyman;
+  this->setRepairingMode();
+
+  var /*persistable:handyman_repair_after_use*/ function repair_after_use() {
+    handyman->setCallCompleted();
+    handyman->setDynamicInfoText("");
+    this->machineRepaired(this->getRoom());
+  }
+
+  var action = WalkAction(ux, uy)->setIsEntering(this_room && true || false);
+
+  var repair_action = UseObjectAction(this)->setProlongedUsage(false)
+      ->setAfterUse(repair_after_use);
+  repair_action.min_length = 20;
+
+  if( handyman_room && handyman_room != this_room ) {
+    handyman->setNextAction(handyman_room->createLeaveAction());
+    handyman->queueAction(action);
+  } else {
+    handyman->setNextAction(action);
+  }
+
+  var meander_loop_callback = /*persistable:handyman_meander_repair_loop_callback*/ function() {
+    if( ! this.user ) {
+      // The machine is ready to be repaired.
+      // The following statement will finish the meander action in the handyman's
+      // action queue.
+      handyman->finishAction();
+    }
+    // Otherwise do nothing and let the meandering continue.
+  };
+
+  // Before the actual repair action, insert a meander action to wait for the machine
+  // to become free for use.
+  handyman->queueAction(MeanderAction()->setLoopCallback(meander_loop_callback));
+
+  // The last one is another walk action to the repair tile. If the handyman goes directly
+  // to repair it will simply complete in an instant.
+  handyman->queueAction(action);
+  handyman->queueAction(repair_action);
+  CallsDispatcher.queueCallCheckpointAction(handyman);
+  handyman->queueAction(AnswerCallAction());
+  handyman->setDynamicInfoText(_S.dynamic_info.staff.actions.going_to_repair
+    ->format(this.object_type.name));
+}
+
+//! Replace this machine (make it pretend it's brand new)
+function Machine::machineReplaced() {
+  // Reset usage stats
+  this.total_usage = 0;
+  this.times_used = 0;
+
+  // Update strength to match the current level of research for it
+  this.strength = this.hospital.research.research_progress[this.object_type].start_strength;
+
+  // Remove any queued repair jobs
+  var index = this.hospital->getIndexOfTask(this.tile_x, this.tile_y, "repairing");
+  if( index != -1 ) {
+    this.hospital->removeHandymanTask(index, "repairing");
+  }
+
+  // Clear icon showing handyman is coming to repair the machine
+  this->setRepairing(null);
+  // Clear smoke
+  setSmoke(this, false);
+}
+
+function Machine::machineRepaired(room) {
+  room.needs_repair = null;
+  var str = this.strength;
+  if( this.times_used/str > 0.55 ) {
+    this.strength = str - 1;
+  }
+  this.times_used = 0;
+  this->setRepairing(null);
+  setSmoke(this, false);
+
+  var taskIndex = this.hospital->getIndexOfTask(this.tile_x, this.tile_y, "repairing");
+  this.hospital->removeHandymanTask(taskIndex, "repairing");
+}
+
+//! Tells the machine to start showing the icon that it needs repair.
+//!   also lock the room from patient entering
+//!param handyman The handyman heading to this machine. nil if repairing is finished
+function Machine::setRepairing(handyman) {
+  // If mode is set to true manually through the dialog, boost the urgency despite of the strength
+  var anim = {icon = 4564}; // The only icon for machinery
+  var room = this->getRoom();
+  this->setMoodInfo(handyman && anim || null);
+  room.needs_repair = handyman;
+  if( handyman ) {
+    this.ticks = true;
+  } else {
+    this.ticks = this.object_type.ticks;
+    this.world.dispatcher->dropFromQueue(this);
+    if( ! room.crashed ) {
+      this->updateDynamicInfo(true);
+      this->getRoom()->tryAdvanceQueue();
+    }
+  }
+}
+
+function Machine::setRepairingMode(lock_room) {
+  if( lock_room != null ) {
+    this.repairing_lock_room = lock_room;
+  }
+  if( this.repairing && this.repairing_lock_room ) {
+    this->setRepairing(this.repairing);
+  }
+}
+
+function Machine.slaveMixinClass(class_method_table) {
+  var slave_to_master, master_to_slave = Object.slaveMixinClass(class_method_table);
+  master_to_slave("finalize");
+  master_to_slave("setCrashedAnimation");
+  slave_to_master("createRepairAction");
+  slave_to_master("getRepairTile");
+  return slave_to_master, master_to_slave;
+}
+
+// Currently used to make the hover cursor of the machine be special
+// only if the room is active at the moment (e.g. not being edited)
+function Machine::finalize(room) {
+  if( room.is_active ) {
+    this.hover_cursor = TheApp.gfx->loadMainCursor("repair");
+    this->updateDynamicInfo(true);
+  } else {
+    this->clearDynamicInfo();
+    this.hover_cursor = null;
+  }
+}
+
+function Machine::updateDynamicInfo(only_update) {
+  if( ! only_update ) {
+    this.times_used = this.times_used + 1;
+    this.total_usage = this.total_usage + 1;
+  }
+  if( this.strength ) {
+    this->setDynamicInfo("text", {
+      this.object_type.name,
+      _S.dynamic_info.object.strength->format(this.strength),
+      _S.dynamic_info.object.times_used->format(this.times_used),
+    });
+  }
+}
+
+function Machine::onClick(ui, button) {
+  var room = this->getRoom();
+  if( button == "left" && room.is_active ) {
+    // If the room is crashed is_active is false.
+    ui->addWindow(UIMachine(ui, this, room));
+  } else {
+    Object.onClick(this, ui, button);
+  }
+}
+
+function Machine::onDestroy() {
+  var room = this->getRoom();
+  if( room ) {
+    room.needs_repair = null;
+  }
+  var index = this.hospital->getIndexOfTask(this.tile_x, this.tile_y, "repairing");
+  if( index != -1 ) {
+    this.hospital->removeHandymanTask(index, "repairing");
+  }
+
+  // Stop this machine from smoking
+  setSmoke(this, false);
+
+  Object.onDestroy(this);
+}
+
+function Machine::afterLoad(old, new) {
+  if( old < 15 ) {
+    if( this.object_type.id == "cardio" ) {
+      // Fix THOB value being wrong
+      this.world.map.th->setCellFlags(this.tile_x, this.tile_y, {
+        thob = this.object_type.thob
+      });
+    }
+  }
+  if( old < 54 ) {
+    var room = this->getRoom();
+    if( room.crashed ) {
+      var taskIndex = room.hospital->getIndexOfTask(this.tile_x, this.tile_y, "repairing");
+      room.hospital->removeHandymanTask(taskIndex, "repairing");
+    }
+  }
+  return Object.afterLoad(this, old, new);
+}
+
+function Machine::tick() {
+  // Tick any smoke animation
+  if( this.smokeInfo ) {
+    this.smokeInfo->tick();
+  }
+
+  return Object.tick(this);
+}
+
+/* Gets the state of a machine
+
+! In addition to the object implementation this includes total_usage
+!return (table) state
+*/
+function Machine::getState() {
+  var state = Object.getState(this);
+  state.total_usage = this.total_usage;
+
+  return state;
+}
+
+/* Sets the state of a machine
+
+! Adds total_usage
+!param state (table) table holding the state
+!return (void)
+*/
+function Machine::setState(state) {
+  Object.setState(this, state);
+  if( state ) {
+    this.total_usage = state.total_usage;
+  }
+}
+
+// Dummy callbacks for savegame compatibility
+var callbackNewRoom = /*persistable:machine_build_callback*/ function(room) { };
+var repair_loop_callback = /*persistable:handyman_repair_loop_callback*/ function() { };

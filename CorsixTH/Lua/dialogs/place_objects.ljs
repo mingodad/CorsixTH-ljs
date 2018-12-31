@@ -1,0 +1,821 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var TH = require("TH");
+var ipairs, math_floor
+    = ipairs, math.floor;
+
+// Visually, it looks better to have the object being placed not attached to a
+// tile (so that it is always on top of walls, etc.), but for debugging it can
+// be useful to attach it to a tile.
+var ATTACH_BLUEPRINT_TO_TILE = false;
+
+//! The dialog shown when placing objects.
+class ("UIPlaceObjects") (Window);
+
+//-@type UIPlaceObjects
+var UIPlaceObjects = _G["UIPlaceObjects"];
+
+/* Constructor for the class.
+!param ui (UI) The active ui.
+!param object_list (table) a list of tables with objects to place. Keys are "object", "qty" and
+"existing_object". The first is the object_type of the object, the second how many, and if the key
+"existing_object" is set it should be an already existing object that is about to be moved.
+In particular, if that object has a variable called current_frame then that frame will be used
+when drawing the object as it is being moved.
+*/
+function UIPlaceObjects::UIPlaceObjects(ui, object_list, pay_for) {
+  this->Window();
+
+  object_list = object_list || {}; // Default argument
+
+  var app = ui.app;
+  this.modal_class = "main";
+  this.ui = ui;
+  this.map = app.map;
+  this.anims = app.anims;
+  this.world = app.world;
+  this.width = 186;
+  this.height = 167 + #object_list * 29;
+  this->setDefaultPosition(0.9, 0.1);
+  this.panel_sprites = app.gfx->loadSpriteTable("QData", "Req05V", true);
+  this.white_font = app.gfx->loadFont("QData", "Font01V");
+  this.blue_font = app.gfx->loadFont("QData", "Font02V");
+  this.title_text = _S.rooms_short.corridor_objects;
+  this.desc_text = _S.place_objects_window.place_objects_in_corridor;
+
+  this->addPanel(112, 0, 0); // Dialog header
+  for( y = 48, 83, 7 ) {
+    this->addPanel(113, 0, y); // Desc text box
+  }
+  this->addPanel(114,   0, 90); // Dialog mid-piece
+  this->addPanel(115,   0, 100)->makeButton(9, 8, 41, 42, 116, this.cancel)->setSound("no4.wav")->setTooltip(_S.tooltip.place_objects_window.cancel);
+  this->addKeyHandler("escape", this.cancel);
+  this.purchase_button =
+  this->addPanel(117,  50, 100)->makeButton(1, 8, 41, 42, 118, this.purchaseItems)->setTooltip(_S.tooltip.place_objects_window.buy_sell)
+    ->setDisabledSprite(127)->enable(false); // Disabled purchase items button
+  this.pickup_button =
+  this->addPanel(119,  92, 100)->makeButton(1, 8, 41, 42, 120, this.pickupItems)->setTooltip(_S.tooltip.place_objects_window.pick_up)
+    ->setDisabledSprite(128)->enable(false)->makeToggle(); // Disabled pick up items button
+  this.confirm_button =
+  this->addPanel(121, 134, 100)->makeButton(1, 8, 43, 42, 122, this.confirm)->setTooltip(_S.tooltip.place_objects_window.confirm)
+    ->setDisabledSprite(129)->enable(false)->setSound("YesX.wav"); // Disabled confirm button
+
+  this.list_header = this->addPanel(123, 0, 146); // Object list header
+  this.list_header.visible = false;
+
+  this.objects = {};
+  this.object_footprint = {};
+  this.num_slots = 0;
+
+  this->addObjects(object_list, pay_for);
+  this->addKeyHandler("space", this.tryNextOrientation);
+
+  ui->setWorldHitTest(false);
+}
+
+// changes the window size and buttons to num_slots slots
+function UIPlaceObjects::resize(num_slots) {
+  if( this.num_slots == num_slots ) {
+    return;
+  }
+
+  if( num_slots == 0 ) {
+    this.list_header.visible = false;
+  } else {
+    this.list_header.visible = true;
+  }
+
+  var function idx(i) {
+    return /*persistable:place_objects_idx1*/ function(window) {
+      if( i == window.active_index ) {
+        window->nextOrientation();
+      } else {
+        window.place_objects = true;
+        window->setActiveIndex(i);
+        // Stop picking up items when user presses object in list
+        var edit_room_window = window.ui->getWindow(UIEditRoom);
+        if( edit_room_window && edit_room_window.in_pickup_mode ) {
+          edit_room_window->stopPickupItems();
+        }
+      }
+    };
+  }
+
+  if( this.num_slots < num_slots ) {
+      // change last panel
+    if( this.num_slots > 0 ) {
+      var last_panel = this.panels[#this.panels - 1];
+      last_panel.y = last_panel.y + 4;
+      last_panel.sprite_index = 124;
+    }
+
+    // add new panels (save last one)
+    for( i = this.num_slots + 1, num_slots - 1 ) {
+      this->addPanel(124, 0, 121 + i * 29)
+        ->makeButton(15, 8, 130, 23, 125, idx(i))
+        ->preservePanel();
+    }
+    // add last new panel
+    this->addPanel(156, 0, 117 + num_slots * 29)
+      ->makeButton(15, 12, 130, 23, 125, idx(num_slots))
+      ->preservePanel();
+  } else {
+    // remove buttons
+    for( _ = this.num_slots, num_slots + 1, -1 ) {
+      // NB: Two panels per item, the latter being a dummy for the button
+      this.panels[#this.panels] = null;
+      this.panels[#this.panels] = null;
+      this.buttons[#this.buttons] = null;
+      if( num_slots > 0 ) {
+        // change appearance of last panel
+        var last_panel = this.panels[#this.panels - 1];
+        last_panel.y = last_panel.y - 4;
+        last_panel.sprite_index = 156;
+      }
+    }
+  }
+  this.num_slots = num_slots;
+  this.height = 167 + (num_slots) * 29;
+}
+
+function UIPlaceObjects::addObjects(object_list, pay_for) {
+  this.visible = true; // even if no objects are to be placed, make the window visible again
+
+  if( ! object_list ) {
+    object_list = {};
+  }
+
+  if( #object_list == 0 && #this.objects == 0 ) {
+    return;
+  }
+
+  // Detect objects already existing in self.objects and increment its quantity
+  // rather than adding new objects lines.
+  var new_index = 1;
+  while( true ) {
+    var new_object = object_list[new_index];
+    if( ! new_object ) { break; }
+    for( _, object in ipairs(this.objects) ) {
+      if( new_object.qty > 0 && new_object.object.thob == object.object.thob ) {
+        object.qty = object.qty + new_object.qty;
+        if( pay_for ) {
+          var build_cost = this.ui.hospital->getObjectBuildCost(new_object.object.id);
+          var msg = _S.transactions.buy_object .. ": " .. object.object.name;
+          this.ui.hospital->spendMoney(new_object.qty * build_cost, msg, new_object.qty * build_cost);
+        }
+        // If this is an object that has been created in the world already, add it to the
+        // associated list of objects to re-place.
+        if( new_object.existing_object ) {
+          if( ! object.existing_objects ) {
+            object.existing_objects = {};
+          }
+          // Insert the new object in the beginning of the list so that that this object
+          // is the one to be placed first. (LIFO)
+          table.insert(object.existing_objects, 1, new_object.existing_object);
+        }
+        table.remove(object_list, new_index);
+        --new_index    ;
+        break;
+      }
+    }
+    ++new_index    ;
+  }
+
+  this.place_objects = true; // When adding objects guess we want to place objects
+
+  this.object_anim = TH.animation();
+  this.object_slave_anim = TH.animation();
+  var total_objects = #this.objects + #object_list;
+  this->resize(total_objects);
+
+  for( _, object in pairs(object_list) ) {
+    if( object.existing_object ) {
+      object.existing_objects = {object.existing_object};
+    }
+    this.objects[#this.objects + 1] = object;
+    if( pay_for ) {
+      var build_cost = this.ui.hospital->getObjectBuildCost(object.object.id);
+      var msg = _S.transactions.buy_object .. ": " .. object.object.name;
+      this.ui.hospital->spendMoney(object.qty * build_cost, msg, object.qty * build_cost);
+    }
+  }
+
+  // sort list by size of object (number of tiles in the first existing orientation (usually north))
+  table.sort(this.objects, function(o1, o2) {
+    var orient1 = o1.object.orientations.north || o1.object.orientations.east ||
+                    o1.object.orientations.south || o1.object.orientations.west;
+    var orient2 = o2.object.orientations.north || o2.object.orientations.east ||
+                    o2.object.orientations.south || o2.object.orientations.west;
+    return #orient1.footprint > #orient2.footprint;
+  });
+
+  this.active_index = 0; // avoid case of index changing from 1 to 1
+  this->setActiveIndex(1);
+  this->onCursorWorldPositionChange(this.ui->getCursorPosition(this));
+}
+
+// precondition: self.active_index has to correspond to the object to be removed
+function UIPlaceObjects::removeObject(object, dont_close_if_empty, refund) {
+  if( refund ) {
+    var build_cost = this.ui.hospital->getObjectBuildCost(object.object.id);
+    var msg = _S.transactions.sell_object .. ": " .. object.object.name;
+    this.ui.hospital->receiveMoney(build_cost, msg, build_cost);
+  }
+
+  object.qty = object.qty - 1;
+  // Prefer to remove objects not yet placed
+  var existing_no = object.existing_objects && #object.existing_objects || 0;
+  if( existing_no > 0 ) {
+    if( object.qty < #object.existing_objects ) {
+      // The object is already as good as destroyed. It is only known in this list.
+      table.remove(object.existing_objects, 1);
+    }
+  }
+  if( object.qty == 0 ) {
+    if( #this.objects == 1 ) {
+      this->clearBlueprint();
+      this.object_cell_x = null;
+      this.object_cell_y = null;
+      if( dont_close_if_empty ) {
+        this.list_header.visible = false;
+        this.place_objects = false; // No object to place
+      } else {
+        this->close();
+        return;
+      }
+    }
+    var idx = this.active_index;
+    table.remove(this.objects, idx);
+    this->resize(#this.objects);
+    this.active_index = 0; // avoid case of index changing from 1 to 1
+    this->setActiveIndex(1);
+  } else {
+    // Make sure the correct frame is shown for the next object
+    this->setOrientation(this.object_orientation);
+  }
+  // Update blueprint
+  this->setBlueprintCell(this.object_cell_x, this.object_cell_y);
+}
+
+function UIPlaceObjects::removeAllObjects(refund) {
+  // There is surely a nicer way to implement this than the current hack. Rewrite it sometime later.
+  this->setActiveIndex(1);
+  for( _ = 1, #this.objects ) {
+    for( _ = 1, this.objects[1].qty ) {
+      this->removeObject(this.objects[1], true, refund);
+    }
+  }
+}
+
+function UIPlaceObjects::removeObjects(object_list, refund) {
+  // rewrite at some point..
+  if( ! object_list ) {
+    object_list = {};
+  }
+
+  for( _, o in ipairs(object_list) ) {
+    for( j, p in ipairs(this.objects) ) {
+      if( o.object.id == p.object.id ) {
+        this.active_index = j;
+        for( _ = 1, o.qty ) {
+          this->removeObject(p, true, refund);
+        }
+      }
+    }
+  }
+}
+
+function UIPlaceObjects::close() {
+  this.ui->tutorialStep(1, {4, 5}, 1);
+  this->removeAllObjects(true);
+  this->clearBlueprint();
+  this.ui->setWorldHitTest(true);
+  return Window.close(this);
+}
+
+function UIPlaceObjects::cancel() {
+  this->close();
+}
+
+function UIPlaceObjects::setActiveIndex(index) {
+  if( index == this.active_index || #this.objects == 0 ) {
+    return;
+  }
+  this.active_index = index;
+
+  var object = this.objects[this.active_index].object;
+  if( object.id == "reception_desk" ) {
+    this.ui->tutorialStep(1, 6, 4);
+  } else {
+    this.ui->tutorialStep(1, {4, 5}, 6);
+  }
+  var anims = this.anims;
+  var grey_scale = anims.Alt32_GreyScale;
+  var _, ghost = this.ui.app.gfx->loadPalette();
+  for( _, anim in pairs(object.idle_animations) ) {
+    anims->setAnimationGhostPalette(anim, ghost, grey_scale);
+  }
+  if( object.slave_type ) {
+    for( _, anim in pairs(object.slave_type.idle_animations) ) {
+      anims->setAnimationGhostPalette(anim, ghost, grey_scale);
+    }
+  }
+
+  if( object.locked_to_wall ) {
+    var wx, wy, wo = this->calculateBestPlacementPosition(0, 0);
+    this.object_cell_x, this.object_cell_y = wx, wy;
+    this->setOrientation(wo);
+  } else {
+    this.object_orientation = "west";
+    this->nextOrientation();
+  }
+}
+
+var orient_mirror = {
+  north = "west",
+  west = "north",
+  east = "south",
+  south = "east",
+};
+
+var orient_next = {
+  north = "east",
+  east = "south",
+  south = "west",
+  west = "north",
+};
+
+function UIPlaceObjects::setOrientation(orient) {
+  this.object_orientation = orient;
+
+  var object_data = this.objects[this.active_index];
+  var object = object_data.object;
+  var anim = object.idle_animations[orient];
+  var flag = 0;
+  if( ! anim ) {
+    anim = object.idle_animations[orient_mirror[orient]];
+    flag = 1;
+  }
+  if( object.orientations[orient].early_list ) {
+    flag +=   1024;
+  }
+  this.object_anim->setAnimation(this.anims, anim, flag);
+  if( object.slave_type ) {
+    var slave_flag = flag - (flag % 2);
+    var slave_anim = object.slave_type.idle_animations[orient];
+    if( ! slave_anim ) {
+      slave_anim = object.slave_type.idle_animations[orient_mirror[orient]];
+      ++slave_flag    ;
+    }
+    this.object_slave_anim->setAnimation(this.anims, slave_anim, slave_flag);
+  }
+  var present_object;
+  if( object_data.existing_objects && #object_data.existing_objects > 0 ) {
+    present_object = object_data.existing_objects[1];
+  }
+  if( present_object && present_object.current_frame ) {
+    this.object_anim->setFrame(present_object.current_frame);
+  }
+  var px, py = unpack(object.orientations[orient].render_attach_position);
+  if( type(px) == "table" ) {
+    px, py = unpack(px);
+  }
+  px, py = Map->WorldToScreen(px + 1, py + 1);
+  px = object.orientations[orient].animation_offset[1] + px;
+  py = object.orientations[orient].animation_offset[2] + py;
+  this.object_anim->setPosition(px, py);
+  if( object.slave_type ) {
+    px, py = unpack(object.slave_type.orientations[orient].render_attach_position);
+    if( type(px) == "table" ) {
+      px, py = unpack(px);
+    }
+    var offset = object.orientations[orient].slave_position;
+    if( offset ) {
+      px = px + offset[1];
+      py = py + offset[2];
+    }
+    px, py = Map->WorldToScreen(px + 1, py + 1);
+    px = object.slave_type.orientations[orient].animation_offset[1] + px;
+    py = object.slave_type.orientations[orient].animation_offset[2] + py;
+    this.object_slave_anim->setPosition(px, py);
+  }
+  this->setBlueprintCell(this.object_cell_x, this.object_cell_y);
+}
+
+function UIPlaceObjects::nextOrientation() {
+  if( ! this.object_anim ) {
+    return;
+  }
+  var object = this.objects[this.active_index].object;
+  if( object.locked_to_wall ) {
+    // Orientation is dictated by the nearest wall
+    return;
+  }
+  var orient = this.object_orientation;
+  do {
+    orient = orient_next[orient];
+  } while(!( object.orientations[orient]) );
+  this->setOrientation(orient);
+}
+
+function UIPlaceObjects::tryNextOrientation() {
+  if( #this.objects > 0 ) {
+    this.ui->playSound("swoosh.wav");
+    this.objects[this.active_index].orientation_before = this.object_orientation;
+    this->nextOrientation();
+  }
+}
+
+function UIPlaceObjects::onMouseUp(button, x, y) {
+  var repaint = Window.onMouseUp(this, button, x, y);
+
+  // We don't want to place objects because we are selecting new objects for adding in a room being built/edited
+  // Or the game is paused.
+  if( ! this.place_objects || ! this.world.user_actions_allowed ) {
+    return;
+  }
+
+  if( button == "right" ) {
+    this->tryNextOrientation();
+    repaint = true;
+  } else if( button == "left" ) {
+    if( #this.objects > 0 ) {
+      if( 0 <= x && x < this.width && 0 <= y && y < this.height ) {
+        // Click within window - do nothing
+      } else if( this.object_cell_x && this.object_cell_y && this.object_blueprint_good ) {
+        this->placeObject();
+        repaint = true;
+      } else if( this.object_cell_x && this.object_cell_y && ! this.object_blueprint_good ) {
+        this.ui->tutorialStep(3, {13, 15}, 14);
+      }
+    }
+  }
+
+  return repaint;
+}
+
+function UIPlaceObjects::placeObject(dont_close_if_empty) {
+  if( ! this.place_objects ) {
+    // We don't want to place objects because we are selecting new objects for adding in a room being built/edited
+    return;
+  }
+
+  var object = this.objects[this.active_index];
+  if( object.object.id == "reception_desk" ) { this.ui->tutorialStep(1, 4, "next"); }
+
+  var real_obj;
+  // There might be an existing object that has been picked up.
+  if( object.existing_objects && #object.existing_objects > 0 ) {
+    real_obj = object.existing_objects[1];
+    table.remove(object.existing_objects, 1);
+  }
+  var room = this.room || this.world->getRoom(this.object_cell_x, this.object_cell_y);
+  if( real_obj ) {
+    // If there is such an object then we don't want to make a new one, but move this one instead.
+    if( real_obj.orientation_before && real_obj.orientation_before != this.object_orientation ) {
+      real_obj->initOrientation(this.object_orientation);
+    }
+    this.world->prepareFootprintTilesForBuild(real_obj.footprint, this.object_cell_x, this.object_cell_y);
+    real_obj->setTile(this.object_cell_x, this.object_cell_y);
+    this.world->objectPlaced(real_obj);
+    if( real_obj.slave ) {
+      this.world->objectPlaced(real_obj.slave);
+    }
+    // Some objects (e.g. the plant) uses this flag to avoid doing stupid things when picked up.
+    real_obj.picked_up = false;
+    // Machines may have smoke, recalculate it to ensure the animation is in the correct state
+    if( real_obj.strength ) {
+      real_obj->calculateSmoke(room);
+    }
+  } else {
+    var object_footprint = object.object.orientations[this.object_orientation].footprint;
+    this.world->prepareFootprintTilesForBuild(object_footprint, this.object_cell_x, this.object_cell_y);
+    real_obj = this.world->newObject(object.object.id,
+        this.object_cell_x, this.object_cell_y, this.object_orientation);
+    real_obj->setState(object.state);
+  }
+  if( room ) {
+    room.objects[real_obj] = true;
+  }
+
+  this.ui->playSound("place_r.wav");
+
+  this->removeObject(object, dont_close_if_empty);
+  object.orientation_before = null;
+
+  return real_obj;
+}
+
+function UIPlaceObjects::draw(canvas, x, y) {
+  if( ! this.visible ) {
+    return; // Do nothing if dialog is not visible
+  }
+  // Don't show the object if the game is paused
+  if( this.world.user_actions_allowed ) {
+    if( ! ATTACH_BLUEPRINT_TO_TILE && this.object_cell_x && this.object_anim ) {
+      var xpos, ypos = this.ui->WorldToScreen(this.object_cell_x, this.object_cell_y);
+      var zoom = this.ui.zoom_factor;
+      if( canvas->scale(zoom) ) {
+        xpos = math.floor(xpos / zoom);
+        ypos = math.floor(ypos / zoom);
+      }
+      this.object_anim->draw(canvas, xpos, ypos);
+      if( this.objects[this.active_index].object.slave_type ) {
+        this.object_slave_anim->draw(canvas, xpos, ypos);
+      }
+      canvas->scale(1);
+    }
+  }
+
+  Window.draw(this, canvas, x, y);
+
+  x, y = x + this.x, y + this.y;
+  this.white_font->draw(canvas, this.title_text, x + 17, y + 21, 153, 0);
+  this.white_font->drawWrapped(canvas, this.desc_text, x + 20, y + 46, 147);
+
+  for( i, o in ipairs(this.objects) ) {
+    var font = this.white_font;
+    var ypos = y + 136 + i * 29;
+    if( i == this.active_index ) {
+      font = this.blue_font;
+    }
+    font->draw(canvas, o.object.name, x + 15, ypos, 130, 0);
+    font->draw(canvas, o.qty, x + 151, ypos, 19, 0);
+  }
+}
+
+function UIPlaceObjects::clearBlueprint() {
+  var map = this.map.th;
+  if( this.object_anim ) {
+    this.object_anim->setTile(null);
+  }
+  if( this.object_slave_anim ) {
+    this.object_slave_anim->setTile(null);
+  }
+  for( _, xy in ipairs(this.object_footprint) ) {
+    if( xy[1] != 0 ) {
+      map->setCell(xy[1], xy[2], 4, 0);
+    }
+  }
+}
+
+var flag_alpha75 = 256 * 8;
+var flag_altpal = 16;
+
+function UIPlaceObjects::setBlueprintCell(x, y) {
+  this->clearBlueprint();
+  this.object_cell_x = x;
+  this.object_cell_y = y;
+  if( x && y && #this.objects > 0 ) {
+    var object = this.objects[this.active_index].object;
+    var object_footprint = object.orientations[this.object_orientation].footprint;
+    var map = this.map.th;
+    if( #object_footprint != #this.object_footprint ) {
+      this.object_footprint = {};
+      for( i = 1, #object_footprint ) {
+        this.object_footprint[i] = {};
+      }
+    }
+    var optional_tiles = 0;
+    for( _, tile in ipairs(object_footprint) ) {
+      if( tile.optional ) {
+        ++optional_tiles    ;
+      }
+    }
+    var flags = {};
+    var allgood = true;
+    var opt_tiles_blocked = 0;
+    var world = this.ui.app.world;
+    var player_id = this.ui.hospital->getPlayerIndex();
+    var roomId = this.room && this.room.id;
+    var passable_flag;
+    var direction = this.object_orientation;
+    var direction_parameters =  {
+      north = { x = 0, y = -1, buildable_flag = "buildableNorth", passable_flag = "travelNorth", needed_side = "need_north_side"},
+      east = { x = 1, y = 0, buildable_flag =  "buildableEast", passable_flag = "travelEast", needed_side = "need_east_side"},
+      south = { x = 0, y = 1, buildable_flag = "buildableSouth", passable_flag = "travelSouth", needed_side = "need_south_side"},
+      west = { x = -1, y = 0, buildable_flag = "buildableWest", passable_flag = "travelWest", needed_side = "need_west_side"}
+      };
+
+    // The given footprint tile is not usable, update the external 'allgood'
+    // variable accordingly.
+    var function setAllGood(xy) {
+      if( xy.optional ) {
+        ++opt_tiles_blocked    ;
+        if( opt_tiles_blocked >= optional_tiles ) {
+          allgood = false;
+        }
+      } else {
+        allgood = false;
+      }
+    }
+
+    for( i, tile in ipairs(object_footprint) ) {
+      var xpos = x + tile[1];
+      var ypos = y + tile[2];
+      // Check 1: Does the tile have valid map coordinates?:
+      if( ! world->isOnMap(xpos, ypos) ) {
+        setAllGood(tile);
+        xpos = 0;
+        ypos = 0;
+      } else {
+        var flag = "buildable";
+        var good_tile = 24 + flag_alpha75;
+        var bad_tile = 67 + flag_alpha75;
+        if( tile.only_passable ) {
+          flag = "passable";
+        }
+        if( tile.only_side ) {
+          if( object.thob == 50 && direction == "east" ) {
+            direction = "west";
+          }
+          flag = direction_parameters[direction]["buildable_flag"];
+          passable_flag = direction_parameters[direction]["passable_flag"];
+        }
+
+        // Check 2: Is the tile in the object's allowed room?:
+        var result = world->willObjectsFootprintTileBeWithinItsAllowedRoomIfLocatedAt(xpos, ypos, object, roomId);
+        var is_object_allowed = result.within_room;
+        roomId = result.roomId;
+
+        // Check 3: The footprint tile should either be buildable or passable, is it?:
+        if( ! tile.only_side && is_object_allowed ) {
+          is_object_allowed = world->isFootprintTileBuildableOrPassable(xpos, ypos, tile, object_footprint, flag, player_id);
+        } else if( is_object_allowed ) {
+          is_object_allowed = map->getCellFlags(xpos, ypos, flags)[flag] && (player_id == 0 || flags.owner == player_id);
+        }
+
+        // ignore placed object tile if it is shareable
+        if( ! tile.shareable && is_object_allowed ) {
+          // Check 4: only one object per tile allowed original TH
+          // can build on litter and unoccupied tiles and only placeable if not on another objects passable footprint unless that too is a shareable tile
+          var objchk = map->getCellFlags(xpos, ypos, flags)["thob"];
+          is_object_allowed = objchk == 0 || objchk == 62 || objchk == 64; // no object, litter/puke, ratholes
+          is_object_allowed = is_object_allowed && world->isTileExclusivelyPassable(xpos, ypos, 10);
+        }
+
+        // Having checked if the tile is good set its blueprint appearance flag:
+        if( is_object_allowed ) {
+          if( ! tile.invisible ) {
+            map->setCell(xpos, ypos, 4, good_tile);
+          }
+        } else {
+          if( ! tile.invisible ) {
+            map->setCell(xpos, ypos, 4, bad_tile);
+          }
+          setAllGood(tile);
+        }
+      }
+      this.object_footprint[i][1] = xpos;
+      this.object_footprint[i][2] = ypos;
+    }
+    if( this.object_anim && object.class != "SideObject" ) {
+      if( allgood ) {
+        allgood = ! world->wouldNonSideObjectBreakPathfindingIfSpawnedAt(x, y, object, this.object_orientation, roomId);
+      }
+      if( ATTACH_BLUEPRINT_TO_TILE ) {
+        this.object_anim->setTile(map, x, y);
+      }
+      this.object_anim->setPartialFlag(flag_altpal, ! allgood);
+      this.object_slave_anim->setPartialFlag(flag_altpal, ! allgood);
+      this.object_blueprint_good = allgood;
+      this.ui->tutorialStep(1, allgood && 5 || 4, allgood && 4 || 5);
+    } else if( object.class == "SideObject" ) {
+      if( map->getCellFlags(x, y)[passable_flag] == true ) {
+        var checked_x, checked_y = x, y;
+        if( passable_flag == "travelNorth" || passable_flag == "travelSouth" ) {
+          checked_y =  checked_y + (passable_flag == "travelNorth" && -1 || 1);
+        } else {
+          checked_x = checked_x + (passable_flag == "travelEast" && 1 || -1);
+        }
+
+        flags = {};
+        flags[passable_flag] = false;
+        map->setCellFlags(x, y, flags);
+        if( ! world.pathfinder->findDistance(x, y, checked_x, checked_y) ) {
+          //we need to check if the failure to get the distance is due to the presence of an object in the adjacent tile
+          if( map->getCellFlags(checked_x, checked_y)["passable"] ) {
+            allgood = false;
+          }
+        }
+        flags[passable_flag] = true;
+        map->setCellFlags(x, y, flags);
+      }
+      if( ATTACH_BLUEPRINT_TO_TILE ) {
+        this.object_anim->setTile(map, x, y);
+      }
+      this.object_anim->setPartialFlag(flag_altpal, ! allgood);
+      this.object_slave_anim->setPartialFlag(flag_altpal, ! allgood);
+      this.object_blueprint_good = allgood;
+      this.ui->tutorialStep(1, allgood && 5 || 4, allgood && 4 || 5);
+    }
+
+  } else {
+    this.object_footprint = {};
+  }
+}
+
+var function NearestPointOnLine(lx1, ly1, lx2, ly2, px, py) {
+  // Translate everything to make one line segment endpoint be on the origin
+  var lx = lx1 - lx2;
+  var ly = ly1 - ly2;
+  px -=   lx2;
+  py = py - ly2;
+
+  // Project point onto line (scale everything to make (lx, ly) be on the unit
+  // circle, then dot product).
+  var d = (lx * px + ly * py) / (lx * lx + ly * ly);
+
+  if( d <= 0 ) {
+    return lx2, ly2;
+  } else if( d >= 1 ) {
+    return lx1, ly1;
+  } else {
+    return d * lx1 + (1 - d) * lx2, d * ly1 + (1 - d) * ly2;
+  }
+}
+
+function UIPlaceObjects::calculateBestPlacementPosition(x, y) {
+  var object = this.objects[this.active_index].object;
+  var room = this.room;
+  var wx, wy = this.ui->ScreenToWorld(this.x + x, this.y + y);
+  var bestd = null;
+  var bestx, besty = wx, wy;
+  var besto = this.object_orientation;
+  if( room && object.locked_to_wall ) {
+    if( object.locked_to_wall.north ) {
+      var px, py = NearestPointOnLine(room.x + 0.5, room.y + 0.5,
+        room.x + room.width - 0.5, room.y + 0.5, wx, wy);
+      var d = ((px - wx)**2 + (py - wy)**2)**0.5;
+      if( ! bestd || d < bestd ) {
+        bestd, bestx, besty, besto = d, px, py, object.locked_to_wall.north;
+      }
+    }
+    if( object.locked_to_wall.west ) {
+      var px, py = NearestPointOnLine(room.x + 0.5, room.y + 0.5,
+        room.x + 0.5, room.y + room.height - 0.5, wx, wy);
+      var d = ((px - wx)**2 + (py - wy)**2)**0.5;
+      if( ! bestd || d < bestd ) {
+        bestx, besty, besto = px, py, object.locked_to_wall.west;
+      }
+    }
+    // TODO: East, South
+  }
+  bestx, besty = math_floor(bestx), math_floor(besty);
+  if( bestx < 1 || besty < 1 ||
+      bestx > this.map.width || besty > this.map.height ) {
+    bestx, besty = null, null;
+  }
+  return bestx, besty, besto;
+}
+
+function UIPlaceObjects::onCursorWorldPositionChange(x, y) {
+  var repaint = Window.onCursorWorldPositionChange(this, x, y);
+  if( ! this.place_objects ) { // We don't want to place objects because we are selecting new objects for adding in a room being built/edited
+    return repaint;
+  }
+
+  repaint = true;
+  if( this.world.user_actions_allowed ) {
+    var wx, wy, wo = this->calculateBestPlacementPosition(x, y);
+    if( wx != this.object_cell_x || wy != this.object_cell_y ) {
+      this->setBlueprintCell(wx, wy);
+      repaint = true;
+    }
+    if( wo != this.object_orientation ) {
+      this->setOrientation(wo);
+      repaint = true;
+    }
+  } else {
+    this->clearBlueprint();
+  }
+
+  return repaint;
+}
+
+function UIPlaceObjects::selectObjectType(object_type) {
+  for( i, o in ipairs(this.objects) ) {
+    if( o.object.id == object_type.id ) {
+      this->setActiveIndex(i);
+      return;
+    }
+  }
+}

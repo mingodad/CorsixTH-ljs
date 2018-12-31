@@ -1,0 +1,438 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var TH = require("TH");
+
+
+class ("UseObjectAction") (HumanoidAction);
+
+//-@type UseObjectAction
+var UseObjectAction = _G["UseObjectAction"];
+
+//! Construct a 'use object' action.
+//!param object (Object) Object to use.
+function UseObjectAction::UseObjectAction(object) {
+  assert(class.is(object, Object), "Invalid value for parameter 'object'");
+
+  this->HumanoidAction("use_object");
+  this.object = object;
+  this.watering_plant = false; // Whether the action is watering the plant.
+  this.prolonged_usage = null; // If true, the usage is prolonged.
+}
+
+//! Set the 'watering plant' flag.
+//!return (action) self, for daisy chaining.
+function UseObjectAction::enableWateringPlant() {
+  this.watering_plant = true;
+  return this;
+}
+
+//! Set prolonged usage of the object.
+//!param prolonged (bool or nil) If set, enable prolonged usage of the object.
+//!return (action) self, for daisy-chaining.
+function UseObjectAction::setProlongedUsage(prolonged) {
+  assert(prolonged == null || type(prolonged) == "boolean",
+      "Invalid value for parameter 'prolonged'");
+
+  this.prolonged_usage = prolonged;
+  return this;
+}
+
+var orient_mirror = {
+  north = "west",
+  west = "north",
+  east = "south",
+  south = "east",
+};
+
+var function action_use_next_phase(action, phase) {
+  ++phase    ;
+  if( phase < -6 ) {
+    phase = -6;
+  }
+  if( phase == -6 && ! action.do_walk ) {
+    ++phase    ;
+  }
+  if( phase == -5 && ! action.anims.begin_use ) {
+    ++phase    ;
+  }
+  if( phase == -4 && ! action.anims.begin_use_2 ) {
+    ++phase    ;
+  }
+  if( phase == -3 && ! action.anims.begin_use_3 ) {
+    ++phase    ;
+  }
+    if( phase == -2 && ! action.anims.begin_use_4 ) {
+    ++phase    ;
+  }
+    if( phase == -1 && ! action.anims.begin_use_5 ) {
+    ++phase    ;
+  }
+  if( phase == 0 && ! action.anims.in_use ) {
+    ++phase    ;
+  }
+  if( phase == 1 && ! action.anims.finish_use ) {
+    ++phase    ;
+  }
+  if( phase == 2 && ! action.anims.finish_use_2 ) {
+    ++phase    ;
+  }
+  if( phase == 3 && ! action.anims.finish_use_3 ) {
+    ++phase    ;
+  }
+    if( phase == 4 && ! action.anims.finish_use_4 ) {
+    ++phase    ;
+  }
+    if( phase == 5 && ! action.anims.finish_use_5 ) {
+    ++phase    ;
+  }
+  if( phase == 6 && ! action.do_walk || phase == 6 && action.destroy_user_after_use ) {
+    ++phase    ;
+  }
+  if( phase > 6 ) {
+    phase = 100;
+  }
+  return phase;
+}
+
+var action_use_object_tick;
+
+var function action_use_phase(action, humanoid, phase) {
+  var object = action.object;
+  humanoid.user_of = null; // Temporary to avoid tile change warning
+  action.phase = phase;
+
+  if( phase == -6 ) {
+    HumanoidRawWalk(humanoid,
+      action.old_tile_x, action.old_tile_y,
+      action.new_tile_x, action.new_tile_y,
+      null, action_use_object_tick);
+    return;
+  } else if( phase == 6 ) {
+    HumanoidRawWalk(humanoid,
+      action.new_tile_x, action.new_tile_y,
+      action.old_tile_x, action.old_tile_y,
+      null, action_use_object_tick);
+    return;
+  }
+  var anim_table = action.anims.in_use;
+  if( phase == -5 ) {
+    anim_table = action.anims.begin_use;
+  } else if( phase == -4 ) {
+    anim_table = action.anims.begin_use_2;
+  } else if( phase == -3 ) {
+    anim_table = action.anims.begin_use_3;
+  } else if( phase == -2 ) {
+    anim_table = action.anims.begin_use_4;
+  } else if( phase == -1 ) {
+    anim_table = action.anims.begin_use_5;
+  } else if( phase == 1 ) {
+    anim_table = action.anims.finish_use;
+  } else if( phase == 2 ) {
+    anim_table = action.anims.finish_use_2;
+  } else if( phase == 3 ) {
+    anim_table = action.anims.finish_use_3;
+  } else if( phase == 4 ) {
+    anim_table = action.anims.finish_use_4;
+  } else if( phase == 5 ) {
+    anim_table = action.anims.finish_use_5;
+  }
+  var is_list = false;
+  var anim = anim_table[humanoid.humanoid_class];
+  if( ! anim ) {
+    // Handymen have their own number of animations.
+    if( humanoid.humanoid_class == "Handyman" ) {
+      //action_use_phase(action, humanoid, action_use_next_phase(action, phase))
+      action_use_object_tick(humanoid);
+      return;
+    } else {
+      error("No animation for " .. humanoid.humanoid_class .. " using " ..
+        object.object_type.id .. " facing " .. object.direction .. " phase " ..
+        phase);
+    }
+  }
+
+  var anim_length = 1;
+  if( type(anim) == "table" && anim.length ) {
+    anim_length = anim.length;
+  }
+
+  if( type(anim) == "table" && anim[1] != "morph" && #anim > 1 ) {
+    // If an animation list is provided rather than a single animation, then
+    // choose an animation from the list at random.
+    is_list = true;
+    anim = anim[math.random(1, #anim)];
+  }
+
+  var flags = action.mirror_flags;
+  if( type(anim) == "table" ) {
+    if( anim.mirror ) {
+      // a single animation may be (un-)mirrored, switch the mirror flag in that case
+      flags = flag_toggle(flags, DrawFlags.FlipHorizontal);
+    }
+    if( anim.object_visible ) {
+      // this flag may be set to make the (idle) object visible additionally to the usage animation
+      object.th->makeVisible();
+    } else {
+      object.th->makeInvisible();
+    }
+    if( anim[1] != "morph" ) {
+      anim = anim[1];
+    }
+  } else {
+    object.th->makeInvisible();
+  }
+
+  if( object.split_anims ) {
+    flags = flags + DrawFlags.Crop;
+    var anims = humanoid.world.anims;
+    for( i = 2, #object.split_anims ) {
+      var th = object.split_anims[i];
+      th->setAnimation(anims, anim, flags);
+    }
+  }
+
+  if( type(anim) == "table" && anim[1] == "morph" ) {
+    // If a table with entries {"morph", A, B} is given rather than a single
+    // animation, then display A first, then morph to B.
+    humanoid->setAnimation(anim[2], flags);
+    var morph_target = TH.animation();
+    var morph_flags = flags;
+    if( anim.mirror_morph ) {
+      morph_flags = flag_toggle(morph_flags, DrawFlags.FlipHorizontal);
+    }
+    morph_target->setAnimation(humanoid.world.anims, anim[3], morph_flags);
+    for( layer, id in pairs(humanoid.layers) ) {
+      morph_target->setLayer(layer, id);
+    }
+    if( anim.layers ) {
+      for( layer, id in pairs(humanoid[anim.layers]) ) {
+        morph_target->setLayer(layer, id);
+      }
+      action.change_layers = humanoid[anim.layers];
+    }
+    humanoid.th->setMorph(morph_target, anim_length);
+    anim = anim[3];
+  } else {
+    humanoid->setAnimation(anim, flags);
+  }
+
+  var offset = object.object_type.orientations;
+  if( offset ) {
+    var tx, ty;
+    offset = offset[object.direction];
+    if( offset.use_animate_from_use_position ) {
+      tx, ty = action.old_tile_x, action.old_tile_y;
+    } else {
+      tx, ty = object->getRenderAttachTile();
+    }
+    if( humanoid.humanoid_class == "Handyman" &&
+      offset.added_handyman_animate_offset_while_in_use ) {
+      tx = tx + offset.added_handyman_animate_offset_while_in_use[1];
+      ty = ty + offset.added_handyman_animate_offset_while_in_use[2];
+    }
+    var added_offset = null;
+    if( offset.added_animation_offset_while_in_use ) {
+      added_offset = offset.added_animation_offset_while_in_use;
+    }
+    offset = offset.animation_offset;
+    if( added_offset ) {
+      humanoid->setTilePositionSpeed(tx, ty, offset[1] + added_offset[1],
+        offset[2] + added_offset[2]);
+    } else {
+      humanoid->setTilePositionSpeed(tx, ty, offset[1], offset[2]);
+    }
+  } else {
+    humanoid->setTilePositionSpeed(object.tile_x, object.tile_y, 0, 0);
+  }
+  humanoid.user_of = object;
+  var length = anim_length * humanoid.world->getAnimLength(anim);
+  if( action.min_length && phase == 0 && action.min_length > length ) {
+    // A certain length is desired.
+    // Even it out so that an integer number of animation sequences are done.
+    length = action.min_length + action.min_length % length;
+  }
+  if( phase == 0 && (! is_list) && length == 1 && action.prolonged_usage &&
+      action.on_interrupt && ! action.loop_callback ) {
+    // a timer would be redundant, so do not set one
+  } else {
+    humanoid->setTimer(length, action_use_object_tick);
+  }
+}
+
+var function init_split_anims(object, humanoid) {
+  if( object.split_anims ) {
+    for( i = 2, #object.split_anims ) {
+      var th = object.split_anims[i];
+      th->setLayersFrom(humanoid.th);
+      th->setHitTestResult(humanoid);
+    }
+    object.ticks = true;
+  }
+}
+
+var function finish_using(object, humanoid) {
+  object->removeUser(humanoid);
+  humanoid.user_of = null;
+  if( object.split_anims ) {
+    var anims, anim, frame, flags = humanoid.world.anims,
+      object.th->getAnimation(), object.th->getFrame(), object.th->getFlag();
+    for( i = 2, #object.split_anims ) {
+      var th = object.split_anims[i];
+      th->setLayersFrom(object.th);
+      th->setHitTestResult(object);
+      th->setAnimation(anims, anim, flags);
+      th->setFrame(frame);
+    }
+    object.ticks = object.object_type.ticks;
+  }
+}
+
+action_use_object_tick = permanent("action_use_object_tick")( function(humanoid) {
+  var action = humanoid->getCurrentAction();
+  var object = action.object;
+  var phase = action.phase;
+  var oldphase = phase;
+  if( oldphase == -6 ) {
+    object->setUser(humanoid);
+    humanoid.user_of = object;
+    init_split_anims(object, humanoid);
+    if( action.after_walk_in ) {
+      action->after_walk_in();
+    }
+  }
+  if( phase != 0 || ! action.prolonged_usage || ! action.on_interrupt ) {
+    phase = action_use_next_phase(action, phase);
+  } else if( action.loop_callback ) {
+    action->loop_callback();
+  }
+  if( action.change_layers ) {
+    for( layer, id in pairs(action.change_layers) ) {
+      humanoid->setLayer(layer, id);
+    }
+    action.change_layers = null;
+  }
+  if( oldphase <= 5 && phase > 5 ) {
+    finish_using(object, humanoid);
+  }
+  if( phase == 100 ) {
+    humanoid->setTilePositionSpeed(action.old_tile_x, action.old_tile_y);
+
+    // Check if the room is about to be destroyed
+    var room_destroyed = false;
+    if( object.strength ) {
+      if( humanoid.humanoid_class != "Handyman"  ) {
+        room_destroyed = object->machineUsed(humanoid->getRoom());
+      }
+    } else if( object->getDynamicInfo() && ! object.master ) {
+      // Don't update if it is a slave object.
+      object->updateDynamicInfo();
+    }
+    if( ! room_destroyed ) {
+      // Note that after_use is not called if the room has been destroyed!
+      // In that case both the patient, staff member(s) and
+      // the actual object are already dead.
+      if( action.after_use ) {
+        action.after_use();
+      }
+
+      if( action.destroy_user_after_use ) {
+        humanoid->despawn();
+        humanoid.world->destroyEntity(humanoid);
+      } else {
+        humanoid->finishAction(action);
+      }
+    }
+  } else {
+    action_use_phase(action, humanoid, phase);
+  }
+});
+
+var action_use_object_interrupt = permanent("action_use_object_interrupt")( function(action, humanoid, high_priority) {
+  if( high_priority ) {
+    var object = action.object;
+    if( humanoid.user_of ) {
+      finish_using(object, humanoid);
+    } else if( object->isReservedFor(humanoid) ) {
+      object->removeReservedUser(humanoid);
+    }
+    humanoid->setTimer(null);
+    humanoid->setTilePositionSpeed(action.old_tile_x, action.old_tile_y);
+    humanoid->finishAction();
+  } else if( ! humanoid.timer_function ) {
+    humanoid->setTimer(1, action_use_object_tick);
+  }
+  // Only patients can be vaccination candidates so no need to check
+  if( humanoid.vaccination_candidate ) {
+    humanoid->removeVaccinationCandidateStatus();
+  }
+});
+
+var function action_use_object_start(action, humanoid) {
+  action.old_tile_x = humanoid.tile_x;
+  action.old_tile_y = humanoid.tile_y;
+  action.on_interrupt = action_use_object_interrupt;
+  action.must_happen = true;
+  var object = action.object;
+  var orient = object.direction;
+  var flags = 0;
+  if( ! object.object_type.usage_animations[orient] ) {
+    orient = orient_mirror[orient];
+    ++flags    ;
+  }
+  var spec = object.object_type.orientations[object.direction];
+  // early_list_while_in_use (if defined) will take precedence over early_list
+  if( spec.early_list_while_in_use || (spec.early_list_while_in_use == null && spec.early_list) ) {
+    flags +=   1024;
+  }
+  // The handyman has his own place to be in
+  if( spec.finish_use_position && humanoid.humanoid_class != "Handyman" ) {
+    action.old_tile_x = object.tile_x + spec.finish_use_position[1];
+    action.old_tile_y = object.tile_y + spec.finish_use_position[2];
+  }
+  if( spec.walk_in_tile ) {
+    action.new_tile_x = spec.walk_in_tile[1] + object.tile_x;
+    action.new_tile_y = spec.walk_in_tile[2] + object.tile_y;
+  } else {
+    action.new_tile_x = object.tile_x;
+    action.new_tile_y = object.tile_y;
+  }
+  var anims = object.object_type.usage_animations[orient];
+  action.anims = anims;
+  action.mirror_flags = flags;
+  if( action.prolonged_usage == null && anims.begin_use &&
+    anims.in_use && anims.finish_use ) {
+    action.prolonged_usage = true;
+  }
+  if( object.object_type.walk_in_to_use ) {
+    action.do_walk = true;
+  } else {
+    object->setUser(humanoid);
+    humanoid.user_of = object;
+    init_split_anims(object, humanoid);
+  }
+  if( action.watering_plant ) {
+    // Tell the plant to start restoring itself
+    object->restoreToFullHealth();
+  }
+  action_use_phase(action, humanoid, action_use_next_phase(action, -100));
+}
+
+return action_use_object_start;

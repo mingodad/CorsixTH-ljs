@@ -1,0 +1,215 @@
+/* Copyright (c) 2011 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var lfs = require("lfs");
+
+//! A tree node representing a file (or directory) in the physical file-system
+//  that meets a given file extension criterion.
+class ("FilteredFileTreeNode") (FileTreeNode);
+
+//-@type FilteredFileTreeNode
+var FilteredFileTreeNode = _G["FilteredFileTreeNode"];
+
+function FilteredFileTreeNode::FilteredFileTreeNode(path, filter) {
+  this->FileTreeNode(path);
+  this.filter_by = filter;
+}
+
+function FilteredFileTreeNode::isValidFile(name) {
+  // Directories and files ending with .sav are valid.
+  if( FileTreeNode.isValidFile(this, name) ) {
+    if( lfs.attributes(this->childPath(name), "mode") == "directory" ) {
+      return true;
+    }
+    if( type(this.filter_by) == "table" ) {
+      for( _, ext in ipairs(this.filter_by) ) {
+        if( string.sub(name->lower(), -string.len(ext)) == ext ) {
+          return true;
+        }
+      }
+    } else {
+      return string.sub(name->lower(), -string.len(this.filter_by)) == this.filter_by;
+    }
+  }
+  return false;
+  // TODO: We don't want to show hidden files on windows. How can we check that?
+}
+
+function FilteredFileTreeNode::createNewNode(path) {
+  return FilteredFileTreeNode(path, this.filter_by);
+}
+
+function FilteredFileTreeNode::getLabel() {
+  // The label was previously only the file name without extension or
+  // folder hierarchy. TODO: Is there some reason to not show the extension?
+  var label = this.label;
+  if( ! label ) {
+    label = FileTreeNode.getLabel(this);
+    /*if type(self.filter_by) == "table" then
+      for _, ext in ipairs(self.filter_by) do
+        if string.sub(label:lower(), -string.len(ext)) == ext then
+          label = string.sub(label:lower(), 0, -string.len(ext) - 1)
+        end
+      end
+    elseif string.sub(label:lower(), -string.len(self.filter_by)) == self.filter_by then
+      label = string.sub(label:lower(), 0, -string.len(self.filter_by) - 1)
+    end--*/
+    this.label = label;
+  }
+  return label;
+}
+
+//! A sortable tree control that accommodates a certain file type and also possibly shows
+//  their last modification dates.
+class ("FilteredTreeControl") (TreeControl);
+
+//-@type FilteredTreeControl
+var FilteredTreeControl = _G["FilteredTreeControl"];
+
+function FilteredTreeControl::FilteredTreeControl(root, x, y, width, height, col_bg, col_fg, has_font, show_dates) {
+  this->TreeControl(root, x, y, width, height, col_bg, col_fg, 14, has_font);
+
+  this.num_rows = (this.tree_rect.h - this.y_offset) / this.row_height;
+
+  // Add the two column headers and make buttons on them.
+  if( show_dates ) {
+    this->addBevelPanel(1, 1, width - 170, 13, col_bg)->setLabel(_S.menu_list_window.name)
+    ->makeButton(0, 0, width - 170, 13, null, this.sortByName)->setTooltip(_S.tooltip.menu_list_window.name);
+    this->addBevelPanel(width - 169, 1, 150, 13, col_bg)->setLabel(_S.menu_list_window.save_date)
+    ->makeButton(0, 0, 150, 13, null, this.sortByDate)->setTooltip(_S.tooltip.menu_list_window.save_date);
+  }
+  this.show_dates = show_dates;
+}
+
+function FilteredTreeControl::sortByName() {
+  if( this.sort_by == "date" || (this.sort_by == "name" && this.order == "descending") ) {
+    this->sortBy("name", "ascending");
+  } else {
+    this->sortBy("name", "descending");
+  }
+}
+
+function FilteredTreeControl::sortByDate() {
+  if( this.sort_by == "name" || (this.sort_by == "date" && this.order == "descending") ) {
+    this->sortBy("date", "ascending");
+  } else {
+    this->sortBy("date", "descending");
+  }
+}
+
+//! Sorts the list according to the given parameters.
+//!param sort_by Either "name" or "date".
+//!param order Either "ascending" or "descending"
+function FilteredTreeControl::sortBy(sort_by, order) {
+  this.sort_by = sort_by;
+  this.order = order;
+  // Find how many nodes are above the first visible one in order
+  // to make the correct new nodes show. (Because of the scrollbar)
+  var number = 0;
+  var node = this.first_visible_node;
+  while( node != this.tree_root ) {
+    ++number    ;
+    node = node->getPrevVisible();
+  }
+  this.tree_root->reSortChildren(sort_by, order);
+  // Now check which new node will be the first visible one.
+  node = this.tree_root;
+  while( number > 0 ) {
+    node = node->getNextVisible();
+    --number    ;
+  }
+  this.first_visible_node = node;
+}
+
+function FilteredTreeControl::drawExtraOnRow(canvas, node, x, y) {
+  // We want to show the modification date to the right of each save.
+  if( ! node->hasChildren() && this.show_dates ) {
+    var last_mod = node->getLastModification();
+    var daytime = _S.date_format.daymonth->format(os.date("%d", last_mod), tonumber(os.date("%m", last_mod)));
+    this.font->draw(canvas, daytime .. " " .. os.date("%Y %X", last_mod), x + this.tree_rect.w  - 140, y);
+  }
+}
+
+//! A file browser with a scrollbar. Used by load_game and save_game.
+class ("UIFileBrowser") (UIResizable);
+
+//-@type UIFileBrowser
+var UIFileBrowser = _G["UIFileBrowser"];
+
+var col_caption = {
+  red = 174,
+  green = 166,
+  blue = 218,
+};
+
+/* Constructs the dialog.
+!param ui (UI) The active ui.
+!param mode (string) Either "menu" or "game" depending on which mode the game is in right now.
+!param title (string) The desired title of the dialog.
+*/
+function UIFileBrowser::UIFileBrowser(ui, mode, title, vertical_size, root, show_dates) {
+  this.col_bg = {
+    red = 154,
+    green = 146,
+    blue = 198,
+  };
+  this.col_scrollbar = {
+    red = 164,
+    green = 156,
+    blue = 208,
+  };
+  var h_size = 450;
+  this->UIResizable(ui, h_size, 380, this.col_bg);
+
+  this.default_button_sound = "selectx.wav";
+
+  this.mode = mode;
+  this.modal_class = mode == "menu" && "main menu" || "saveload";
+  this.on_top = mode == "menu";
+  this.esc_closes = true;
+  this.resizable = false;
+  this->setDefaultPosition(0.5, 0.25);
+
+  this->addBevelPanel((h_size - 190) / 2, 10, 190, 20, col_caption)->setLabel(title)
+    .lowered = true;
+
+  // Initialize the tree control
+  this.control = FilteredTreeControl(root, 5, 35, h_size - 10, vertical_size, this.col_bg, this.col_scrollbar, true, show_dates)
+    ->setSelectCallback(/*persistable:file_browser_select_callback*/ function(node) {
+      if( node.is_valid_file && (lfs.attributes(node.path, "mode") != "directory") ) {
+        this->choiceMade(node.path);
+      }
+    });
+  this->addWindow(this.control);
+
+  // Create the back button.
+  this->addBevelPanel((h_size - 160) / 2, 340, 160, 30, this.col_bg)->setLabel(_S.menu_list_window.back)
+    ->makeButton(0, 0, 160, 40, null, this.buttonBack)->setTooltip(_S.tooltip.menu_list_window.back);
+}
+
+// Function stub for dialogs to override. This function is called each time a file is chosen.
+//!param name (string) Name of the file chosen.
+function UIFileBrowser::choiceMade(name) {
+}
+
+function UIFileBrowser::buttonBack() {
+  this->close();
+}
+

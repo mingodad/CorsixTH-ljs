@@ -1,0 +1,932 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+corsixth.require("window");
+
+//! Top-level container for all other user-interface components.
+class ("UI") (Window);
+
+//-@type UI
+var UI = _G["UI"];
+
+var TH = require("TH");
+var SDL = require("sdl");
+var WM = SDL.wm;
+var lfs = require("lfs");
+
+var function invert(t) {
+  var r = {};
+  for( k, v in pairs(t) ) {
+    if( type(v) == "table" ) {
+      for( _, val in ipairs(v) ) {
+        r[val] = k;
+      }
+    } else {
+      r[v] = k;
+    }
+  }
+  return r;
+}
+
+function UI::initKeyAndButtonCodes() {
+  var key_remaps = {};
+  var button_remaps = {};
+  var key_to_button_remaps = {};
+  var key_norms = setmetatable({
+    [" "] = "space",
+    esc = "escape",
+  }, {__index = function(t, k) {
+    k = tostring(k)->lower();
+    return rawget(t, k) || k;
+  }});
+  {
+    var ourpath = debug.getinfo(1, "S").source->sub(2, -7);
+    var result, err = loadfile_envcall(ourpath .. "key_mapping.txt");
+    if( ! result ) {
+      print("Cannot load key mapping:" .. err);
+    } else {
+      var env = {
+        key_remaps = function(t) {
+          for( k, v in pairs(t) ) {
+            key_remaps[key_norms[k]] = key_norms[v];
+          }
+        },
+        button_remaps = function(t) {
+          for( k, v in pairs(t) ) {
+            k = key_norms[k];
+            if( k == "left" || k == "middle" || k == "right" ) {
+              button_remaps[k] = key_norms[v];
+            } else {
+              key_to_button_remaps[k] = key_norms[v];
+            }
+          }
+        },
+      };
+      setmetatable(env, {__index = function(_, k) {
+        return k;
+      }});
+      result(env);
+    }
+  }
+
+  var keypad = {
+    ["Keypad 0"] = "insert",
+    ["Keypad 1"] = "end",
+    ["Keypad 2"] = "down",
+    ["Keypad 3"] = "pagedown",
+    ["Keypad 4"] = "left",
+    ["Keypad 6"] = "right",
+    ["Keypad 7"] = "home",
+    ["Keypad 8"] = "up",
+    ["Keypad 9"] = "pageup",
+    ["Keypad ."] = "delete",
+  };
+
+  // Apply keypad remapping
+  for( k, v in pairs(keypad) ) {
+    key_remaps[key_norms[k]] = key_norms[v];
+  }
+
+  this.key_remaps = key_remaps;
+  this.key_to_button_remaps = key_to_button_remaps;
+
+  this.button_codes = {
+    left = 1,
+    middle = 2,
+    right = 3,
+  };
+
+  // Apply button remaps directly to codes, as mouse button codes are reliable
+  // (keyboard key codes are not).
+  var original_button_codes = {};
+  for( input, behave_as in pairs(button_remaps) ) {
+    var code = original_button_codes[input] || this.button_codes[input] || {};
+    if( ! original_button_codes[input] ) {
+      original_button_codes[input] = code;
+      this.button_codes[input] = null;
+    }
+    if( ! original_button_codes[behave_as] ) {
+      original_button_codes[behave_as] = this.button_codes[behave_as];
+    }
+    this.button_codes[behave_as] = code;
+  }
+
+  this.button_codes = invert(this.button_codes);
+}
+
+var LOADED_DIALOGS = false;
+
+function UI::UI(app, minimal) {
+  this->Window();
+  this->initKeyAndButtonCodes();
+  this.app = app;
+  this.screen_offset_x = 0;
+  this.screen_offset_y = 0;
+  this.cursor = null;
+  this.cursor_entity = null;
+  this.debug_cursor_entity = null;
+  // through trial and error, this palette seems to give the desired result (white background, black text)
+  // NB: Need a palette present in both the full game and in the demo data
+  if( minimal ) {
+    this.tooltip_font = app.gfx->loadBuiltinFont();
+  } else {
+    var palette = app.gfx->loadPalette("QData", "PREF01V.PAL");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    this.tooltip_font = app.gfx->loadFont("QData", "Font00V", false, palette);
+  }
+  this.tooltip = null;
+  this.tooltip_counter = 0;
+  this.background = false;
+  // tick_scroll_amount will either hold a table containing x and y values, at
+  // at least one of which being non-zero. If both x and y are zero, then the
+  // value false should be used instead, so that tests to see if there is any
+  // scrolling to be done are quick and simple.
+  this.tick_scroll_amount = false;
+  this.tick_scroll_amount_mouse = false;
+  this.tick_scroll_mult = 1;
+  this.modal_windows = {
+    // [class_name] -> window,
+  };
+  // Windows can tell UI to pass specific codes forward to them. See addKeyHandler and removeKeyHandler
+  this.key_handlers = {};
+
+  this.down_count = 0;
+  if( ! minimal ) {
+    this.default_cursor = app.gfx->loadMainCursor("default");
+    this.down_cursor = app.gfx->loadMainCursor("clicked");
+    this.grab_cursor = app.gfx->loadMainCursor("grab");
+    this.edit_room_cursor = app.gfx->loadMainCursor("edit_room");
+    this.waiting_cursor = app.gfx->loadMainCursor("sleep");
+  }
+  this.editing_allowed = true;
+
+  if( ! LOADED_DIALOGS ) {
+    app->loadLuaFolder("dialogs", true);
+    app->loadLuaFolder("dialogs/fullscreen", true);
+    app->loadLuaFolder("dialogs/resizables", true);
+    app->loadLuaFolder("dialogs/resizables/menu_list_dialogs", true);
+    app->loadLuaFolder("dialogs/resizables/file_browsers", true);
+    LOADED_DIALOGS = true;
+  }
+
+  this->setCursor(this.default_cursor);
+
+  // to avoid a bug which causes open fullscreen windows to display incorrectly, load
+  // the sprite sheet associated with all fullscreen windows so they are correctly cached.
+  // Darrell: Only do this if we have a valid data directory otherwise we won't be able to
+  // display the directory browser to even find the data directory.
+  // Edvin: Also, the demo does not contain any of the dialogs.
+  if( this.app.good_install_folder && ! this.app.using_demo_files ) {
+    var gfx = this.app.gfx;
+    var palette;
+    // load drug casebook sprite table
+    palette = gfx->loadPalette("QData", "DrugN01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    gfx->loadSpriteTable("QData", "DrugN02V", true, palette);
+    // load fax sprite table
+    palette = gfx->loadPalette("QData", "Fax01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    gfx->loadSpriteTable("QData", "Fax02V", true, palette);
+    // load town map sprite table
+    palette = gfx->loadPalette("QData", "Town01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    gfx->loadSpriteTable("QData", "Town02V", true, palette);
+    // load hospital policy sprite table
+    palette = gfx->loadPalette("QData", "Pol01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    gfx->loadSpriteTable("QData", "Pol02V", true, palette);
+    // load bank manager sprite table
+    palette = gfx->loadPalette("QData", "Bank01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    gfx->loadSpriteTable("QData", "Bank02V", true, palette);
+    // load research screen sprite table
+    palette = gfx->loadPalette("QData", "Res01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    gfx->loadSpriteTable("QData", "Res02V", true, palette);
+    // load progress report sprite table
+    palette = gfx->loadPalette("QData", "Rep01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    gfx->loadSpriteTable("QData", "Rep02V", true, palette);
+    // load annual report sprite table
+    palette = gfx->loadPalette("QData", "Award02V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    gfx->loadSpriteTable("QData", "Award03V", true, palette);
+  }
+
+  this->setupGlobalKeyHandlers();
+}
+
+function UI::runDebugScript() {
+  print("Executing Debug Script...");
+  var path_sep = package.config->sub(1, 1);
+  var lua_dir = debug.getinfo(1, "S").source->sub(2, -8);
+  _ = TheApp.ui && TheApp.ui.debug_cursor_entity;
+  var script = assert(loadfile(lua_dir .. path_sep .. "debug_script.ljs"));
+  script();
+}
+
+function UI::setupGlobalKeyHandlers() {
+  // Add some global keyhandlers
+  this->addKeyHandler("escape", this, this.closeWindow);
+  this->addKeyHandler("escape", this, this.stopMovie);
+  this->addKeyHandler("space", this, this.stopMovie);
+  this->addKeyHandler({"ctrl", "s"}, this, this.makeScreenshot);
+  this->addKeyHandler({"alt", "return"}, this, this.toggleFullscreen);
+  this->addKeyHandler({"alt", "keypad enter"}, this, this.toggleFullscreen);
+  this->addKeyHandler({"alt", "f4"}, this, this.exitApplication);
+  this->addKeyHandler({"shift", "f10"}, this, this.resetApp);
+  this->addKeyHandler({"ctrl", "f10"}, this, this.toggleCaptureMouse);
+
+  this->addOrRemoveDebugModeKeyHandlers();
+}
+
+function UI::connectDebugger() {
+  var error_message = TheApp->connectDebugger();
+  if( error_message ) {
+    this->addWindow(UIInformation(this, {error_message}));
+  }
+}
+
+// Used for everything except music and announcements
+function UI::playSound(name, played_callback, played_callback_delay) {
+  if( this.app.config.play_sounds ) {
+    this.app.audio->playSound(name, null, false, played_callback, played_callback_delay);
+  }
+}
+
+// Used for announcements only
+function UI::playAnnouncement(name, played_callback, played_callback_delay) {
+  if( this.app.config.play_announcements ) {
+    this.app.audio->playSound(name, null, true, played_callback, played_callback_delay);
+  }
+}
+
+function UI::setDefaultCursor(cursor) {
+  if( cursor == null ) {
+    cursor = "default";
+  }
+  if( type(cursor) == "string" ) {
+    cursor = this.app.gfx->loadMainCursor(cursor);
+  }
+  if( this.cursor == this.default_cursor ) {
+    this->setCursor(cursor);
+  }
+  this.default_cursor = cursor;
+}
+
+function UI::setCursor(cursor) {
+  if( cursor != this.cursor ) {
+    this.cursor = cursor;
+    if( cursor.use ) {
+      // Cursor is a true C cursor, perhaps even a hardware cursor.
+      // Make the real cursor visible, and use this as it.
+      this.simulated_cursor = null;
+      WM.showCursor(true);
+      cursor->use(this.app.video);
+    } else {
+      // Cursor is a Lua simulated cursor.
+      // Make the real cursor invisible, and simulate it with this.
+      WM.showCursor(false);
+      this.simulated_cursor = cursor;
+    }
+  }
+}
+
+function UI::drawTooltip(canvas) {
+  if( ! this.tooltip || ! this.tooltip_counter || this.tooltip_counter > 0 ) {
+    return;
+  }
+
+  var x, y = this.tooltip.x, this.tooltip.y;
+  if( ! this.tooltip.x ) {
+    // default to cursor position for (lower left corner of) tooltip
+    x, y = this->getCursorPosition();
+  }
+
+  if( this.tooltip_font ) {
+    this.tooltip_font->drawTooltip(canvas, this.tooltip.text, x, y);
+  }
+}
+
+function UI::draw(canvas) {
+  var app = this.app;
+  if( this.background ) {
+    var bg_w, bg_h = this.background_width, this.background_height;
+    var screen_w, screen_h = app.config.width, app.config.height;
+    var factor = math.max(screen_w / bg_w, screen_h / bg_h);
+    if( canvas->scale(factor, "bitmap") || canvas->scale(factor) ) {
+      this.background->draw(canvas, math.floor((screen_w - bg_w * factor) / 2), math.floor((screen_h - bg_h * factor) / 2));
+      canvas->scale(1);
+    } else {
+      canvas->fillBlack();
+      this.background->draw(canvas, math.floor((screen_w - bg_w) / 2), math.floor((screen_h - bg_h) / 2));
+    }
+  }
+  Window.draw(this, canvas, 0, 0);
+  this->drawTooltip(canvas);
+  if( this.simulated_cursor ) {
+    this.simulated_cursor.draw(canvas, this.cursor_x, this.cursor_y);
+  }
+}
+
+//! Register a key handler / hotkey for a window.
+//!param keys (string or table) The keyboard key which should trigger the callback (for
+// example, "left" or "z" or "F9"), or a list with modifier(s) and the key (e.g. {"ctrl", "s"}).
+//!param window (Window) The UI window which should receive the callback.
+//!param callback (function) The method to be called on `window` when `key` is
+// pressed.
+//!param ... Additional arguments to `callback`.
+function UI::addKeyHandler(keys, window, callback, ...) {
+  keys = (type(keys) == "table") && keys || {keys};
+
+  var key = table.remove(keys, #keys)->lower();
+  var modifiers = list_to_set(keys); // SET of modifiers
+  if( ! this.key_handlers[key] ) {
+    // No handlers for this key? Create a new table.
+    this.key_handlers[key] = {};
+  }
+  table.insert(this.key_handlers[key], {
+    modifiers = modifiers,
+    window = window,
+    callback = callback,
+    ...
+  });
+}
+
+//! Unregister a key handler previously registered by `addKeyHandler`.
+//!param keys (string or table) The key or list of modifiers+key of a key / window
+// pair previously passed to `addKeyHandler`.
+//!param window (Window) The window of a key / window pair previously passed
+// to `addKeyHandler`.
+function UI::removeKeyHandler(keys, window) {
+  keys = (type(keys) == "table") && keys || {keys};
+
+  var key = table.remove(keys, #keys)->lower();
+  var modifiers = list_to_set(keys); // SET of modifiers
+  if( this.key_handlers[key] ) {
+    for( index, info in ipairs(this.key_handlers[key]) ) {
+      if( info.window == window && compare_tables(info.modifiers, modifiers) ) {
+        table.remove(this.key_handlers[key], index);
+      }
+    }
+    // If last key handler was removed, delete the (now empty) list.
+    if( #this.key_handlers[key] == 0 ) {
+      this.key_handlers[key] = null;
+    }
+  }
+}
+
+var menu_bg_sizes = { // Available menu background sizes
+  {1920, 1080},
+};
+
+function UI::setMenuBackground() {
+  var bg_size = menu_bg_sizes[1];
+  this.background = this.app.gfx->loadRaw("mainmenu" .. bg_size[2], bg_size[1], bg_size[2], "Bitmap");
+  this.background_width = bg_size[1];
+  this.background_height = bg_size[2];
+}
+
+function UI::onChangeResolution() {
+  // If we are in the main menu (== no world), reselect the background
+  if( ! this.app.world ) {
+    this->setMenuBackground();
+  }
+  // Inform windows of resolution change
+  if( ! this.windows ) {
+    return;
+  }
+  for( _, window in ipairs(this.windows) ) {
+    window->onChangeResolution();
+  }
+}
+
+function UI::registerTextBox(box) {
+  this.textboxes[#this.textboxes + 1] = box;
+}
+
+function UI::unregisterTextBox(box) {
+  for( num, b in ipairs(this.textboxes) ) {
+    if( b == box ) {
+      table.remove(this.textboxes, num);
+      break;
+    }
+  }
+}
+
+function UI::changeResolution(width, height) {
+  this.app->prepareVideoUpdate();
+  var error_message = this.app.video->update(width, height, unpack(this.app.modes));
+  this.app->finishVideoUpdate();
+
+  if( error_message ) {
+    print("Warning: Could not change resolution to " .. width .. "x" .. height .. ".");
+    print("The error was: ");
+    print(error_message);
+    return false;
+  }
+
+  this.app.config.width = width;
+  this.app.config.height = height;
+
+  // Redraw cursor
+  var cursor = this.cursor;
+  this.cursor = null;
+  this->setCursor(cursor);
+  // Save new setting in config
+  this.app->saveConfig();
+
+  this->onChangeResolution();
+
+  return true;
+}
+
+function UI::toggleCaptureMouse() {
+  this.app.capturemouse = ! this.app.capturemouse;
+  this.app.video->setCaptureMouse(this.app.capturemouse);
+}
+
+function UI::toggleFullscreen() {
+  var modes = this.app.modes;
+
+  var function toggleMode(index) {
+    this.app.fullscreen = ! this.app.fullscreen;
+    if( this.app.fullscreen ) {
+      modes[index] = "fullscreen";
+    } else {
+      modes[index] = "";
+    }
+  }
+
+  // Search in modes table if it contains a fullscreen value and keep the index
+  // If not found, we will add an index at end of table
+  var index = #modes + 1;
+  for( i=1, #modes ) {
+    if( modes[i] == "fullscreen" ) {
+      index = i;
+      break;
+    }
+  }
+
+  // Toggle Fullscreen mode
+  toggleMode(index);
+
+  var success = true;
+  this.app->prepareVideoUpdate();
+  var error_message = this.app.video->update(this.app.config.width, this.app.config.height, unpack(modes));
+  this.app->finishVideoUpdate();
+
+  if( error_message ) {
+    success = false;
+    var mode_string = modes[index] || "windowed";
+    print("Warning: Could not toggle to " .. mode_string .. " mode with resolution of " .. this.app.config.width .. "x" .. this.app.config.height .. ".");
+    // Revert fullscreen mode modifications
+    toggleMode(index);
+  }
+
+  // Redraw cursor
+  var cursor = this.cursor;
+  this.cursor = null;
+  this->setCursor(cursor);
+
+  if( success ) {
+    // Save new setting in config
+    this.app.config.fullscreen = this.app.fullscreen;
+    this.app->saveConfig();
+  }
+
+  return success;
+}
+
+//! Called when the user presses a key on the keyboard
+//!param rawchar (string) The name of the key the user pressed.
+//!param is_repeat (boolean) True if this is a key repeat event
+function UI::onKeyDown(rawchar, modifiers, is_repeat) {
+  var handled = false;
+  // Apply key-remapping and normalisation
+  rawchar = string.sub(rawchar,1,6) == "Keypad" &&
+            modifiers["numlockactive"] && string.sub(rawchar,8) || rawchar;
+  var key = rawchar->lower();
+  {
+    var mapped_button = this.key_to_button_remaps[key];
+    if( mapped_button ) {
+      this->onMouseDown(mapped_button, this.cursor_x, this.cursor_y);
+      return true;
+    }
+    key = this.key_remaps[key] || key;
+  }
+
+  // Remove numlock modifier
+  modifiers["numlockactive"] = null;
+
+  // If there is one, the current textbox gets the key.
+  // It will not process any text at this point though.
+  for( _, box in ipairs(this.textboxes) ) {
+    if( box.enabled && box.active && ! handled ) {
+      handled = box->keyInput(key, rawchar);
+    }
+  }
+
+  // Otherwise, if there is a key handler bound to the given key, then it gets
+  // the key.
+  if( ! handled ) {
+    var keyHandlers = this.key_handlers[key];
+    if( keyHandlers ) {
+      // Iterate over key handlers and call each one whose modifier(s) are pressed
+      // NB: Only if the exact correct modifiers are pressed will the shortcut get processed.
+      for( _, handler in ipairs(keyHandlers) ) {
+        if( compare_tables(handler.modifiers, modifiers) ) {
+          handler.callback(handler.window, unpack(handler));
+          handled = true;
+        }
+      }
+    }
+  }
+
+  this.buttons_down[key] = true;
+  this.modifiers_down = modifiers;
+  this.key_press_handled = handled;
+  return handled;
+}
+
+//! Called when the user releases a key on the keyboard
+//!param rawchar (string) The name of the key the user pressed.
+function UI::onKeyUp(rawchar) {
+  rawchar = SDL.getKeyModifiers().numlockactive &&
+            string.sub(rawchar,1,6) == "Keypad" && string.sub(rawchar,8) ||
+            rawchar;
+  var key = rawchar->lower();
+  {
+    var mapped_button = this.key_to_button_remaps[key];
+    if( mapped_button ) {
+      this->onMouseUp(mapped_button, this.cursor_x, this.cursor_y);
+      return true;
+    }
+    key = this.key_remaps[key] || key;
+  }
+  this.buttons_down[key] = null;
+}
+
+function UI::onEditingText(text, start, length) {
+  // Does nothing at the moment. We are handling text input ourselves.
+}
+
+//! Called in-between onKeyDown and onKeyUp. The argument 'text' is a
+//! string containing the input localized according to the keyboard layout
+//! the user uses.
+function UI::onTextInput(text) {
+  // It's time for any active textbox to get input.
+  for( _, box in ipairs(this.textboxes) ) {
+    if( box.enabled && box.active ) {
+      box->textInput(text);
+    }
+  }
+
+  // Finally it might happen that a hotkey was not recognized because of
+  // differing local keyboard layout. Give it another shot.
+  if( ! this.key_press_handled ) {
+    var keyHandlers = this.key_handlers[text];
+    if( keyHandlers ) {
+      // Iterate over key handlers and call each one whose modifier(s) are pressed
+      // NB: Only if the exact correct modifiers are pressed will the shortcut get processed.
+      for( _, handler in ipairs(keyHandlers) ) {
+        if( compare_tables(handler.modifiers, this.modifiers_down) ) {
+          handler.callback(handler.window, unpack(handler));
+        }
+      }
+    }
+  }
+}
+
+function UI::onMouseDown(code, x, y) {
+  var repaint = false;
+  var button = this.button_codes[code] || code;
+  if( this.app.moviePlayer.playing ) {
+    if( button == "left" ) {
+      this.app.moviePlayer->stop();
+    }
+    return true;
+  }
+  if( this.cursor_entity == null && this.down_count == 0 &&
+      this.cursor == this.default_cursor ) {
+    this->setCursor(this.down_cursor);
+    repaint = true;
+  }
+  this.down_count = this.down_count + 1;
+  if( x >= 3 && y >= 3 && x < this.app.config.width - 3 && y < this.app.config.height - 3 ) {
+    this.buttons_down["mouse_"..button] = true;
+  }
+
+  this->updateTooltip();
+  return Window.onMouseDown(this, button, x, y) || repaint;
+}
+
+function UI::onMouseUp(code, x, y) {
+  var repaint = false;
+  var button = this.button_codes[code] || code;
+  this.down_count = this.down_count - 1;
+  if( this.down_count <= 0 ) {
+    if( this.cursor_entity == null && this.cursor == this.down_cursor ) {
+      this->setCursor(this.default_cursor);
+      repaint = true;
+    }
+    this.down_count = 0;
+  }
+  this.buttons_down["mouse_"..button] = null;
+
+  if( Window.onMouseUp(this, button, x, y) ) {
+    repaint = true;
+  } else {
+    if( this->ableToClickEntity(this.cursor_entity) ) {
+      this.cursor_entity->onClick(this, button);
+      repaint = true;
+    }
+  }
+
+  this->updateTooltip();
+  return repaint;
+}
+
+function UI::onMouseWheel(x, y) {
+  Window.onMouseWheel(this, x, y);
+}
+
+/* Determines if a cursor entity can be clicked
+@param entity (Entity,nil) cursor entity clicked on if any
+@return true if can be clicked on, false otherwise (boolean) */
+function UI::ableToClickEntity(entity) {
+  if( this.cursor_entity && this.cursor_entity.onClick ) {
+    var hospital = entity.hospital;
+    var epidemic = hospital && hospital.epidemic;
+
+    return this.app.world.user_actions_allowed && ! epidemic ||
+      (epidemic && ! epidemic.vaccination_mode_active);
+  } else {
+    return false;
+  }
+}
+
+function UI::getScreenOffset() {
+  return this.screen_offset_x, this.screen_offset_y;
+}
+
+var tooltip_ticks = 30; // Amount of ticks until a tooltip is displayed
+
+function UI::updateTooltip() {
+  if( this.buttons_down.mouse_left ) {
+    // Disable tooltips altogether while left button is pressed.
+    this.tooltip = null;
+    this.tooltip_counter = null;
+    return;
+  } else if( this.tooltip_counter == null ) {
+    this.tooltip_counter = tooltip_ticks;
+  }
+  var tooltip = this->getTooltipAt(this.cursor_x, this.cursor_y);
+  if( tooltip ) {
+    // NB: Do not set counter if tooltip changes here. This allows quick tooltip reading of adjacent buttons.
+    this.tooltip = tooltip;
+  } else {
+    // Not hovering over any button with tooltip -> reset
+    this.tooltip = null;
+    this.tooltip_counter = tooltip_ticks;
+  }
+}
+
+var UpdateCursorPosition = TH.cursor.setPosition;
+
+//! Called when the mouse enters or leaves the game window.
+function UI::onWindowActive(gain) {
+}
+
+//! Window has been resized by the user
+//!param width (integer) New window width
+//!param height (integer) New window height
+function UI::onWindowResize(width, height) {
+  if( ! this.app.config.fullscreen ) {
+    this->changeResolution(width, height);
+  }
+}
+
+function UI::onMouseMove(x, y, dx, dy) {
+  var repaint = UpdateCursorPosition(this.app.video, x, y);
+
+  this.cursor_x = x;
+  this.cursor_y = y;
+
+  if( this.drag_mouse_move ) {
+    this.drag_mouse_move(x, y);
+    return true;
+  }
+
+  if( Window.onMouseMove(this, x, y, dx, dy) ) {
+    repaint = true;
+  }
+
+  this->updateTooltip();
+
+  return repaint;
+}
+
+function UI::onTick() {
+  Window.onTick(this);
+  var repaint = false;
+  if( this.tooltip_counter && this.tooltip_counter > 0 ) {
+    this.tooltip_counter = this.tooltip_counter - 1;
+    repaint = (this.tooltip_counter == 0);
+  }
+  // If a tooltip is currently shown, update each tick (may be dynamic)
+  if( this.tooltip ) {
+    this->updateTooltip();
+  }
+  return repaint;
+}
+
+
+function UI::addWindow(window) {
+  if( window.closed ) {
+    return;
+  }
+  if( window.modal_class ) {
+    // NB: while instead of if in case of another window being created during the close function
+    while( this.modal_windows[window.modal_class] ) {
+      this.modal_windows[window.modal_class]->close();
+    }
+    this.modal_windows[window.modal_class] = window;
+  }
+  if( window.modal_class == "main" || window.modal_class == "fullscreen" ) {
+    this.editing_allowed = false; // do not allow editing rooms if main windows (build, furnish, hire) are open
+  }
+  Window.addWindow(this, window);
+}
+
+function UI::removeWindow(window) {
+  if( Window.removeWindow(this, window) ) {
+    var class = window.modal_class;
+    if( class && this.modal_windows[class] == window ) {
+      this.modal_windows[class] = null;
+    }
+    if( window.modal_class == "main" || window.modal_class == "fullscreen" ) {
+      this.editing_allowed = true; // allow editing rooms again when main window is closed
+    }
+    return true;
+  } else {
+    return false;
+  }
+}
+
+function UI::getCursorPosition(window) {
+  // Given no argument, returns the cursor position in screen space
+  // Otherwise, returns the cursor position in the space of the given window
+  var x, y = this.cursor_x, this.cursor_y;
+  while( window != null && window != this ) {
+    x = x - window.x;
+    y = y - window.y;
+    window = window.parent;
+  }
+  return x, y;
+}
+
+function UI::addOrRemoveDebugModeKeyHandlers() {
+  this->removeKeyHandler({"ctrl", "c"}, this);
+  this->removeKeyHandler("f12", this);
+  this->removeKeyHandler({"shift", "d"}, this);
+  if( this.app.config.debug ) {
+    this->addKeyHandler({"ctrl", "c"}, this, this.connectDebugger);
+    this->addKeyHandler("f12", this, this.showLuaConsole);
+    this->addKeyHandler({"shift", "d"}, this, this.runDebugScript);
+  }
+}
+
+function UI::afterLoad(old, new) {
+  if( old < 5 ) {
+    this.editing_allowed = true;
+  }
+  if( old < 63 ) {
+    // modifiers have been added to key handlers
+    for( _, handlers in pairs(this.key_handlers) ) {
+      for( _, handler in ipairs(handlers) ) {
+        handler.modifiers = {};
+      }
+    }
+    // some global key shortcuts were converted to use keyHandlers
+    this->removeKeyHandler("f12", this);
+    this->removeKeyHandler({"shift", "d"}, this);
+    this->setupGlobalKeyHandlers();
+  }
+
+  if( old < 70 ) {
+    this->removeKeyHandler("f10", this);
+    this->addKeyHandler({"shift", "f10"}, this, this.resetApp);
+    this->removeKeyHandler("a", this);
+  }
+  // changing this so that it is quit application and Shift + Q is quit to main menu
+  if( old < 71 ) {
+    this->removeKeyHandler({"alt", "f4"}, this, this.quit);
+    this->addKeyHandler({"alt", "f4"}, this, this.exitApplication);
+  }
+
+  if( old < 100 ) {
+    this->removeKeyHandler({"alt", "enter"}, this);
+    this->addKeyHandler({"alt", "return"}, this, this.toggleFullscreen);
+  }
+  if( old < 104 ) {
+    this->addKeyHandler({"alt", "keypad enter"}, this, this.toggleFullscreen);
+  }
+
+  if( old < 118 ) {
+    this->addKeyHandler({"ctrl", "f10"}, this, this.toggleCaptureMouse);
+  }
+
+  Window.afterLoad(this, old, new);
+}
+
+// Stub to allow the function to be called in e.g. the information
+// dialog without having to worry about a GameUI being present
+function UI::tutorialStep(...) {
+}
+
+function UI::makeScreenshot() {
+   // Find an index for screenshot which is not already used
+  var i = 0;
+  var filename;
+  do {
+    filename = TheApp.screenshot_dir .. ("screenshot%i.bmp")->format(i);
+    ++i    ;
+  } while(!( lfs.attributes(filename, "size") == null) );
+  print("Taking screenshot: " .. filename);
+  var res, err = this.app.video->takeScreenshot(filename); // Take screenshot
+  if( ! res ) {
+    print("Screenshot failed: " .. err);
+  } else {
+    this.app.audio->playSound("SNAPSHOT.WAV");
+  }
+}
+
+//! Closes one window (the topmost / active window, if possible)
+//!return true iff a window was closed
+function UI::closeWindow() {
+  if( ! this.windows ) {
+    return false;
+  }
+
+  // Close the topmost window first
+  var first = this.windows[1];
+  if( first.on_top && first.esc_closes ) {
+    first->close();
+    return true;
+  }
+  for( i = #this.windows, 1, -1 ) {
+    var window = this.windows[i];
+    if( window.esc_closes ) {
+      window->close();
+      return true;
+    }
+  }
+}
+
+//! Shows the Lua console
+function UI::showLuaConsole() {
+  this->addWindow(UILuaConsole(this));
+}
+
+//! Triggers reset of the application (reloads .ljs files)
+function UI::resetApp() {
+  debug.getregistry()._RESTART = true;
+  TheApp.running = false;
+}
+// Added this function as quit does not exit the application, it only exits the game to the menu screen
+function UI::exitApplication() {
+  this.app->abandon();
+}
+
+//! Triggers quitting the application
+function UI::quit() {
+  this.app->exit();
+}
+
+//! Tries to stop a video, if one is currently playing
+function UI::stopMovie() {
+  if( this.app.moviePlayer.playing ) {
+    this.app.moviePlayer->stop();
+  }
+}
+
+// Stub for compatibility with savegames r1896-1921
+function UI::stopVideo() { }

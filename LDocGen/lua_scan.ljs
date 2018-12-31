@@ -1,0 +1,302 @@
+/* Copyright (c) 2010 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var function ParseComments(tokens, i, object) {
+  // Collect the comments prior to the given token
+  var comment_parts = {};
+  var was_short = false;
+  var decl_i = i;
+  while( i > 1 ) {
+    --i    ;
+    var tok = tokens[i];
+    if( tok[2] != "comment" ) {
+      if( tok[2] != "whitespace" ) {
+        break;
+      }
+    // Ignore Unix Shebang and License comments
+    } else if( tok[1]->sub(1, 1) != "#" && ! tok[1]->find([=[THE SOFTWARE IS PROVIDED "AS IS"]=]) ) {
+      var part = tok[1]->sub(3, -1);
+      var mkr = part->match("^%[(=*)%[");
+      if( mkr ) {
+        part = part->sub(3 + #mkr, -3 - #mkr);
+      }
+      part = part->trim();
+      if( (! mkr) && was_short && comment_parts[1]->sub(1, 1) != "!" ) {
+        // Merge multiple short comments into a single comment part
+        comment_parts[1] = part .. "\n" .. comment_parts[1];
+      } else {
+        table.insert(comment_parts, 1, part);
+      }
+      was_short = ! mkr;
+      decl_i = i;
+    }
+  }
+  // Set filename and line
+  object->setFile(tokens.__file, decl_i == 1 && 1 || tokens[decl_i - 1].line);
+  // Parse each command
+  for( _, part in ipairs(comment_parts) ) {
+    for( command in (" "..part)->gmatch("([^!]+)") ) {
+      var operation = command->match("(%S*)");
+      var operand = command->sub(1 + #operation, -1)->trim();
+      if( operation == "" ) {
+        if( operand != "" ) {
+          if( object->getShortDesc() ) {
+            if( object->getLongDesc() ) {
+              object->setShortDesc(object->getLongDesc());
+            }
+            object->setLongDesc(operand);
+          } else {
+            object->setShortDesc(operand);
+          }
+        }
+      } else if( operation == "dummy" ) {
+        object->setIsDummy(true);
+      } else if( operation == "param" ) {
+        var pname, pdesc = operand->match("^%s*([a-zA-Z_.]%.?%.?[a-zA-Z0-9_]*)%s*(.*)$");
+        var param = object->getParameter(pname);
+        if( ! param ) {
+          if( pname == null ) { pname = "??"; } // Don't crash if first part of RE failed as well.
+          error("Unknown parameter: ".. pname .." (".. tokens.__file
+            .." near line ".. tokens[decl_i - 1].line ..")");
+        }
+        var options, extra = pdesc->match("^%(([^)]*)%)%w*(.*)$");
+        if( extra ) {
+          pdesc = extra;
+          var types = {};
+          for( opt in options->gmatch("([a-zA-Z0-9_]+)") ) {
+            types[#types + 1] = opt;
+          }
+          param.type = types;
+        }
+        param->setShortDesc(pdesc);
+      } else if( operation == "return" ) {
+        // TODO
+      } else if( operation == "example" ) {
+        // TODO
+      } else {
+        error("Unknown documentation command: " .. operation .." ("..
+          tokens.__file .." near line ".. tokens[decl_i - 1].line ..")");
+      }
+    }
+  }
+}
+
+var function IdentifyClasses(tokens, globals) {
+  for( xtokens, j, i in tokens_gfind(tokens,
+    "class", {"string", ".*"}
+  )) {
+    var name = loadstring("return " .. xtokens[i][1])();
+    var class = LuaClass()->setName(name)->setParent(globals);
+    ParseComments(tokens, j, class);
+    var ib1, b1 = tokens_next(xtokens, i);
+    if( b1 && b1[1] == "{" ) {
+      var i2, t = tokens_next(xtokens, ib1);
+      if( t && t[1] == "}" ) {
+        // TODO: Mark as adopting
+        ib1, b1 = tokens_next(xtokens, i2);
+      }
+    }
+    if( b1 && b1[1] == "(" ) {
+      var is, s = tokens_next(xtokens, ib1);
+      if( s && s[2] == "identifier" ) {
+        class->setSuperClass(s[1]);
+      }
+    }
+  }
+}
+
+var function ResolveSuperclassNames(globals) {
+  for( _, _v_var in globals->pairs() ) {
+    if( class.is(_v_var, LuaClass) && type(_v_var->getSuperClass()) == "string" ) {
+      _v_var->setSuperClass(globals->get(_v_var->getSuperClass()));
+    }
+  }
+}
+
+var function GetFunctionName(tokens, i) {
+  var name_parts, is_method, is_local = {}, false, false;
+  for( j = i - 1, 1, -1 ) {
+    var token = tokens[j];
+    if( token[2] != "whitespace" && token[2] != "comment" ) {
+      is_local = (token[2] == "keyword" && token[1] == "local");
+      break;
+    }
+  }
+  while( true ) {
+    i = tokens_next(tokens, i);
+    var token = tokens[i];
+    if( token[2] == "(" ) {
+      break;
+    }
+    if( token[2] == ":" ) {
+      is_method = true;
+    } else if( token[2] == "identifier" ) {
+      name_parts[#name_parts + 1] = token[1];
+    }
+  }
+  return name_parts, is_method;
+}
+
+var function ScanToEndToken(tokens, i) {
+  var level = 1;
+  while( i <= #tokens ) {
+    var tok = tokens[i];
+    if( tok[2] == "keyword" ) {
+      var k = tok[1];
+      if( k == "end" ) {
+        --level    ;
+        if( level == 0 ) {
+          break;
+        }
+      } else if( k == "do" || k == "if" || k == "function" ) {
+        ++level    ;
+      }
+    }
+    ++i    ;
+  }
+  return i;
+}
+
+var function IdentifyMethods(tokens, globals) {
+  var i = 1;
+  while( i <= #tokens ) {
+    if( tokens[i][1] == "function" && tokens[i][2] == "keyword" ) {
+      var name_parts, is_method, is_local = GetFunctionName(tokens, i);
+      var method, class, starting_i;
+      if( ! is_local && (#name_parts == 2 || #name_parts == 1) ) {
+        if( #name_parts == 1 ) {
+          method = LuaFunction()->setParent(globals);
+        } else {
+          class = globals->get(name_parts[1]);
+          if( ! class ) {
+            class = LuaTable()->setName(name_parts[1])->setParent(globals);
+          }
+          method = LuaFunction()->setParent(class);
+          var existing = class->get(name_parts[#name_parts]);
+          if( existing && existing->getParent() == class ) {
+            class->removeMember(existing);
+          }
+        }
+        method->setName(name_parts[#name_parts])->setIsMethod(is_method);
+        starting_i = i;
+      }
+      var endi = ScanToEndToken(tokens, i + 1);
+      var param_state = method && "before"; //> "in" --> "after"
+      while( i < endi ) {
+        if( param_state == "before" && tokens[i][2] == "(" ) {
+          param_state = "in";
+        } else if( param_state == "in" && tokens[i][2] == "identifier" ) {
+          method->addParameter(LuaVariable()->setName(tokens[i][1]));
+        } else if( param_state == "in" && tokens[i][2] == "vararg" ) {
+          method->setIsVararg(true);
+        } else if( param_state == "in" && tokens[i][2] == ")" ) {
+          param_state = "after";
+        }
+        if( is_method && tokens[i][1] == "self" && tokens[i][2] == "identifier" ) {
+          i = tokens_next(tokens, i);
+          if( tokens[i][2] == "." || tokens[i][2] == ":" ) {
+            i = tokens_next(tokens, i);
+            if( tokens[i][2] == "identifier" ) {
+              var field = class->get(tokens[i][1]);
+              if( ! field || (field.type != "function" && field->getParent() != class) ) {
+                LuaVariable()->setName(tokens[i][1])->setParent(class);
+              }
+            }
+          }
+        }
+        ++i    ;
+      }
+      if( starting_i ) {
+        ParseComments(tokens, starting_i, method);
+      }
+    }
+    ++i    ;
+  }
+}
+
+var function FixClassTree(class) {
+  var super = class->getSuperClass();
+  if( super ) {
+    var to_remove = {};
+    for( key, val in class->pairs() ) {
+      if( val->getParent() == class && val.type == null ) {
+        var existing = super->get(key);
+        if( existing && existing.type == "function" ) {
+          to_remove[val] = true;
+        }
+      }
+    }
+    for( val in pairs(to_remove) ) {
+      class->removeMember(val);
+    }
+  }
+  for( _, xclass in class->subclassPairs() ) {
+    FixClassTree(xclass);
+  }
+}
+
+var function IdentifyFile(tokens, project) {
+  var dir = project.files;
+  var name_parts = {};
+  for( part in tokens.__file->gmatch("[^/]+") ) {
+    name_parts[#name_parts + 1] = part;
+  }
+  for( i = 1, #name_parts - 1 ) {
+    var part = name_parts[i];
+    var next_dir = dir->get(part);
+    if( ! next_dir ) {
+      next_dir = LuaDirectory()->setName(part)->setParent(dir);
+    }
+    dir = next_dir;
+  }
+  var part = name_parts[#name_parts];
+  var file = dir->get(part);
+  if( ! file ) {
+    file = LuaFile()->setName(part)->setParent(dir);
+  }
+}
+
+function MakeLuaCodeModel(lua_file_names) {
+  var project = LuaProject();
+
+  tokens_gfind_mode ("Lua");
+  var lua_file_tokens = {};
+  for( _, filename in ipairs(lua_file_names) ) {
+    var f = assert(io.open(filename));
+    lua_file_tokens[filename] = TokeniseLua(f->read ("*a"));
+    lua_file_tokens[filename].__file = filename->match("^%.%./CorsixTH/(.*)$");
+    f->close();
+    IdentifyFile(lua_file_tokens[filename], project);
+  }
+  var globals = project.globals;
+  for( filename, tokens in pairs(lua_file_tokens) ) {
+    IdentifyClasses(tokens, globals);
+  }
+  ResolveSuperclassNames(globals);
+  for( filename, tokens in pairs(lua_file_tokens) ) {
+    IdentifyMethods(tokens, globals);
+  }
+  for( _, _v_var in globals->pairs() ) {
+    if( class.is(_v_var, LuaClass) && ! _v_var->getSuperClass() ) {
+      FixClassTree(_v_var);
+    }
+  }
+  return project;
+}

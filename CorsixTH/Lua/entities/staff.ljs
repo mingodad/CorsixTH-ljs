@@ -1,0 +1,1040 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! A Doctor, Nurse, Receptionist, Handyman, or Surgeon
+class ("Staff") (Humanoid);
+
+//-@type Staff
+var Staff = _G["Staff"];
+
+//!param ... Arguments to base class constructor.
+function Staff::Staff(...) {
+  this->Humanoid(...);
+  this.hover_cursor = TheApp.gfx->loadMainCursor("staff");
+  this.parcelNr = 0;
+}
+
+function Staff::tickDay() {
+  Humanoid.tickDay(this);
+  // Pay too low  --> unhappy
+  // Pay too high -->   happy
+  var fair_wage = this.profile->getFairWage();
+  var wage = this.profile.wage;
+  this->changeAttribute("happiness", 0.05 * (wage - fair_wage) / (fair_wage != 0 && fair_wage || 1));
+  // if you overwork your Dr's then there is a chance that they can go crazy
+  // when this happens, find him and get him to rest straight away
+  if( this.attributes["fatigue"] ) {
+    if( this.attributes["fatigue"] < 0.7 ) {
+      if( this->isResting() ) {
+        this->setMood("tired", "deactivate");
+        this->setCrazy(false);
+        this->changeAttribute("happiness", 0.006);
+      }
+    } else {
+      // doctor can go crazy if they're too tired
+      if( this.humanoid_class == "Doctor" ) {
+        if( math.random(1, 300) == 1 ) {
+          this->setCrazy(true);
+        }
+      }
+    }
+  // Working when you should be taking a break will make you unhappy
+    if( this.attributes["fatigue"] >= this.hospital.policies["goto_staffroom"] ) {
+      this->changeAttribute("happiness", -0.02);
+    }
+  // You will also start to become unhappy as you become tired
+    if( this.attributes["fatigue"] >= 0.5 ) {
+      this->changeAttribute("happiness", -0.01);
+    }
+  }
+  // It is nice to see plants, but dead plants make you unhappy
+  this.world->findObjectNear(this, "plant", 2, function(x, y) {
+    var plant = this.world->getObject(x, y, "plant");
+    if( plant ) {
+      if( plant->isPleasing() ) {
+        this->changeAttribute("happiness", 0.002);
+      } else {
+        this->changeAttribute("happiness", -0.003);
+      }
+    }
+  });
+  // It always makes you happy to see you are in safe place
+  this.world->findObjectNear(this, "extinguisher", 2, function(x, y) {
+    this->changeAttribute("happiness", 0.002);
+  });
+  // Extra room items add to your happiness (some more than others)
+  this.world->findObjectNear(this, "bin", 2, function(x, y) {
+    this->changeAttribute("happiness", 0.001);
+  });
+  this.world->findObjectNear(this, "bookcase", 2, function(x, y) {
+    this->changeAttribute("happiness", 0.003);
+  });
+  this.world->findObjectNear(this, "skeleton", 2, function(x, y) {
+    this->changeAttribute("happiness", 0.002);
+  });
+  this.world->findObjectNear(this, "tv", 2, function(x, y) {
+    this->changeAttribute("happiness", 0.0005);
+  });
+  // Being able to rest from work and play the video game or pool will make you happy
+  if( (this->getCurrentAction().name == "use_object" && this->getCurrentAction().object.object_type.id == "video_game") ) {
+   this->changeAttribute("happiness", 0.08);
+  }
+  if( (this->getCurrentAction().name == "use_object" && this->getCurrentAction().object.object_type.id == "pool_table") ) {
+   this->changeAttribute("happiness", 0.074);
+  }
+  if( (this->getCurrentAction().name == "use_object" && this->getCurrentAction().object.object_type.id == "sofa") ) {
+   this->changeAttribute("happiness", 0.05);
+  }
+
+  //TODO windows in your work space and a large space to work in add to happiness
+  // working in a small space makes you unhappy
+
+  // is self researcher in research room?
+  if( this->isResearching() ) {
+    this.hospital.research->addResearchPoints(1550 + 1000*this.profile.skill);
+  // is self using lecture chair in a training room w/ a consultant?
+  } else if( this->isLearning() ) {
+    // Find values for how fast doctors learn the different professions from the level
+    var level_config = this.world.map.level_config;
+    var surg_thres = 1;
+    var psych_thres = 1;
+    var res_thres = 1;
+    if( level_config && level_config.gbv.AbilityThreshold ) {
+      surg_thres = level_config.gbv.AbilityThreshold[0];
+      psych_thres = level_config.gbv.AbilityThreshold[1];
+      res_thres = level_config.gbv.AbilityThreshold[2];
+    }
+    var general_thres = 200; // general skill factor
+
+    var room = this->getRoom();
+    // room_factor starts at 5 for a basic room w/ TrainingRate == 4
+    // books add +1.5, skeles add +2.0, see TrainingRoom:calculateTrainingFactor
+    var room_factor = room->getTrainingFactor();
+    // number of staff includes consultant
+    var staff_count = room->getStaffCount() - 1;
+    // update general skill
+    this->trainSkill(room.staff_member, "skill", general_thres, room_factor, staff_count);
+    // update special skill based on consultant skills
+    if( room.staff_member.profile.is_surgeon >= 1.0 ) {
+      this->trainSkill(room.staff_member, "is_surgeon", surg_thres, room_factor, staff_count);
+    }
+    if( room.staff_member.profile.is_psychiatrist >= 1.0 ) {
+      this->trainSkill(room.staff_member, "is_psychiatrist", psych_thres, room_factor, staff_count);
+    }
+    if( room.staff_member.profile.is_researcher >= 1.0 ) {
+      this->trainSkill(room.staff_member, "is_researcher", res_thres, room_factor, staff_count);
+    }
+  }
+  this->needsWorkStation();
+}
+
+function Staff::tick() {
+  Entity.tick(this);
+  // don't do anything if they're fired or picked up or have no hospital
+  if( this.fired || this.pickup || ! this.hospital ) {
+    return;
+  }
+
+  // check if we need to use the staff room and go there if so
+  this->checkIfNeedRest();
+  // check if staff has been waiting too long for a raise and fire if so
+  this->checkIfWaitedTooLong();
+
+  // Decide whether the staff member should be tiring and tire them
+  if( this->isTiring() ) {
+    this->tire(0.000090);
+    this->changeAttribute("happiness", -0.00002);
+  }
+
+    // if doctor is in a room and they're using an object
+    // then their skill level will increase _slowly_ over time
+  if( this->isLearningOnTheJob() ) {
+    this->updateSkill(this.humanoid_class, "skill", 0.000003);
+  }
+
+  // Make staff members request a raise if they are very unhappy
+  if( ! this.world.debug_disable_salary_raise && this.attributes["happiness"] < 0.1 ) {
+    if( ! this.timer_until_raise ) {
+      this.timer_until_raise = 200;
+    }
+    if( this.timer_until_raise == 0 ) {
+      this->requestRaise();
+    } else {
+      this.timer_until_raise = this.timer_until_raise - 1;
+    }
+  } else {
+    this.timer_until_raise = null;
+  }
+  // seeing litter will make you unhappy. If it is pee or puke it is worse
+  this.world->findObjectNear(this, "litter", 2, function(x, y) {
+  var litter = this.world->getObject(x, y, "litter");
+  if( ! litter ) {
+    return;
+  }
+    if( litter->anyLitter() ) {
+      this->changeAttribute("happiness", -0.0002);
+    } else {
+      this->changeAttribute("happiness", -0.0004);
+    }
+  });
+  this->updateSpeed();
+}
+
+function Staff::checkIfWaitedTooLong() {
+  if( this.quitting_in ) {
+    this.quitting_in = this.quitting_in - 1;
+    if( this.quitting_in < 0 ) {
+      var rise_windows = this.world.ui->getWindows(UIStaffRise);
+      var staff_rise_window = null;
+
+      // We go through all "requesting rise" windows open, to see if we need
+      // to close them when the person is fired.
+      for( i = 1, #rise_windows ) {
+        if( rise_windows[i].staff == this ) {
+          staff_rise_window = rise_windows[i];
+          break;
+        }
+      }
+      //If the hospital policy is set to automatically grant wage increases, grant the requested raise
+      //instead of firing the staff member
+      if( this.hospital.policies.grant_wage_increase ) {
+        var amount = math.floor(math.max(this.profile.wage * 1.1, (this.profile->getFairWage(this.world) + this.profile.wage) / 2) - this.profile.wage);
+        this.quitting_in = null;
+        this->setMood("pay_rise", "deactivate");
+        this.world.ui.bottom_panel->removeMessage(this);
+        this->increaseWage(amount);
+        return;
+      }
+
+      // Plays the sack sound, but maybe it's good that you hear a staff member leaving?
+      if( staff_rise_window ) {
+        staff_rise_window->fireStaff();
+      } else {
+        this->fire();
+      }
+    }
+  }
+}
+
+function Staff::leaveAnnounce() {
+  if( this.humanoid_class == "Nurse" ) {
+    var nurse = {"sack004.wav", "sack005.wav",};
+    this.world.ui->playAnnouncement(nurse[math.random(1, #nurse)]);
+  } else if( this.humanoid_class == "Doctor"  ) {
+    var doctor = {"sack001.wav", "sack002.wav", "sack003.wav",};
+    this.world.ui->playAnnouncement(doctor[math.random(1, #doctor)]);
+  } else if( this.humanoid_class == "Receptionist" ) {
+    var receptionist = {"sack007.wav", "sack008.wav",};
+    this.world.ui->playAnnouncement(receptionist[math.random(1, #receptionist)]);
+  } else if( this.humanoid_class == "Handyman" ) {
+    this.world.ui->playAnnouncement("sack006.wav");
+  }
+}
+
+function Staff::isTiring() {
+  var tiring = true;
+
+  var room = this->getRoom();
+  // Being in a staff room is actually quite refreshing, as long as you're not a handyman watering plants.
+  if( room ) {
+    if( room.room_info.id == "staff_room" && ! this.on_call ) {
+      tiring = false;
+    }
+  } else if( this.humanoid_class != "Handyman" ) {
+    tiring = false;
+  }
+
+  // Picking staff members up doesn't tire them, it just tires the player.
+  if( this->getCurrentAction().name == "pickup" ) {
+    tiring = false;
+  }
+
+  return tiring;
+}
+
+function Staff::isResting() {
+  var room = this->getRoom();
+
+  if( room && room.room_info.id == "staff_room" && ! this.on_call ) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+// Determine if the staff member should contribute to research
+function Staff::isResearching() {
+  var room = this->getRoom();
+
+  // Staff is in research lab, is qualified, and is not leaving the hospital.
+  return room && room.room_info.id == "research" &&
+      this.humanoid_class == "Doctor" && this.profile.is_researcher >= 1.0 && this.hospital;
+}
+
+// Determine if the staff member should increase their skills
+function Staff::isLearning() {
+  var room = this->getRoom();
+
+  // Staff is in training room, the training room has a consultant, and  is using lecture chair.
+  return room && room.room_info.id == "training" && room.staff_member &&
+      this->getCurrentAction().name == "use_object" &&
+      this->getCurrentAction().object.object_type.id == "lecture_chair";
+}
+
+function Staff::isLearningOnTheJob() {
+  var room = this->getRoom();
+
+  // Staff is in room but not training room, staff room, or toilets; is a doctor; and is using something
+  return room && room.room_info.id != "training" &&
+      room.room_info.id != "staff_room" && room.room_info.id != "toilets" &&
+      this.humanoid_class == "Doctor" && this->getCurrentAction().name == "use_object";
+}
+
+
+function Staff::updateSkill(consultant, trait, amount) {
+  var old_profile = {
+    is_junior = this.profile.is_junior,
+    is_consultant = this.profile.is_consultant
+  };
+
+  // don't push further when they are already at 100%+
+  if( this.profile[trait] >= 1.0 ) {
+    return;
+  }
+
+  this.profile[trait] = this.profile[trait] + amount;
+  if( this.profile[trait] >= 1.0 ) {
+    this.profile[trait] = 1.0;
+    var is = trait->match("^is_(.*)");
+    if( is == "surgeon" || is == "psychiatrist" || is == "researcher" ) {
+      this.world.ui.adviser->say(_A.information.promotion_to_specialist->format(_S.staff_title[is]));
+    }
+    this->updateStaffTitle();
+  }
+
+  if( trait == "skill" ) {
+    this.profile->parseSkillLevel();
+
+    if( old_profile.is_junior && ! this.profile.is_junior ) {
+      this.world.ui.adviser->say(_A.information.promotion_to_doctor);
+      this->updateStaffTitle();
+    } else if( ! old_profile.is_consultant && this.profile.is_consultant ) {
+      this.world.ui.adviser->say(_A.information.promotion_to_consultant);
+      if( this->getRoom().room_info.id == "training" ) {
+        this->setNextAction(this->getRoom()->createLeaveAction());
+        this->queueAction(MeanderAction());
+        this.last_room = null;
+      }
+      this->updateStaffTitle();
+    }
+  }
+}
+
+function Staff::trainSkill(consultant, trait, skill_thres, room_factor, staff_count) {
+  // TODO: tweak/rework this algorithm
+  // TODO: possibly adjust based upon consultant's skill level?
+  //       possibly based on attention to detail?
+  var constant = 12.0;
+  var staff_factor = constant + (staff_count-1)*(constant/6.0);
+  var delta = room_factor / (skill_thres * staff_factor);
+  this->updateSkill(consultant, trait, delta);
+}
+
+// Immediately terminate the staff member's employment.
+function Staff::fire() {
+  if( this.fired ) {
+    return;
+  }
+
+  // Ensure that there are no inspection windows open for this staff member.
+  var staff_window = this.world.ui->getWindow(UIStaff);
+  if( staff_window && staff_window.staff == this ) {
+      staff_window->close();
+  }
+  this.hospital->spendMoney(this.profile.wage, _S.transactions.severance .. ": " .. this.profile.name);
+  this.world.ui->playSound("sack.wav");
+  this->setMood("exit", "activate");
+  this->setDynamicInfoText(_S.dynamic_info.staff.actions.fired);
+  this.fired = true;
+  this.hospital->changeReputation("kicked");
+  this->despawn();
+  this.hover_cursor = null;
+  this.attributes["fatigue"] = null;
+  this->leaveAnnounce();
+  // Unregister any build callbacks or messages.
+  this->unregisterCallbacks();
+  // Update the staff management window if it is open.
+  var window = this.world.ui->getWindow(UIStaffManagement);
+  if( window ) {
+    window->updateStaffList(this);
+  }
+}
+
+function Staff::die() {
+  this->despawn();
+  if( this.task ) {
+    // If the staff member had a task outstanding, unassigning them from that task.
+    // Tasks with no handyman assigned will be eligible for reassignment by the hospital.
+    this.task.assignedHandyman = null;
+    this.task = null;
+  }
+  // Update the staff management screen (if present) accordingly
+  var window = this.world.ui->getWindow(UIStaffManagement);
+  if( window ) {
+    window->updateStaffList(this);
+  }
+  // It may be that the staff member was fired just before dying (then self.hospital = nil)
+  this.world.ui.hospital->humanoidDeath(this);
+}
+
+// Despawns the staff member and removes them from the hospital
+function Staff::despawn() {
+  this.hospital->removeStaff(this);
+  Humanoid.despawn(this);
+}
+
+// Function which is called when the user clicks on the staff member.
+// Responsible for opening a staff information dialog on left click and picking
+// up the staff member on right click.
+//!param ui (GameUI) The UI which the user in question is using.
+//!param button (string) One of: "left", "middle", "right".
+function Staff::onClick(ui, button) {
+  if( this.fired ) {
+    return;
+  }
+
+  if( button == "left" ) {
+    if( this.message_callback ) {
+      this->message_callback();
+    } else {
+      ui->addWindow(UIStaff(ui, this));
+    }
+  } else if( button == "right" ) {
+    this.pickup = true;
+    this->setNextAction(PickupAction(ui), true);
+  }
+  Humanoid.onClick(this, ui, button);
+}
+
+function Staff::dump() {
+  print("-----------------------------------");
+  if( this.on_call ) {
+    print("On call: ");
+    CallsDispatcher.dumpCall(this.on_call);
+  } else {
+    print('On call: no');
+  }
+  print("Busy: ", (this->isIdle() && "idle" || "busy") .. (this.pickup && " and picked up" || ''));
+  if( this.going_to_staffroom ) { print("Going to staffroom"); }
+  if( this.last_room ) {
+      print("Last room: ", this.last_room.room_info.id .. '@' .. this.last_room.x ..','.. this.last_room.y);
+  }
+
+  if( this.humanoid_class == "Handyman" ) {
+    print("Cleaning: " .. this.attributes["cleaning"],
+          "Watering: " .. this.attributes["watering"],
+          "Repairing: " .. this.attributes["repairing"]);
+  }
+
+  Humanoid.dump(this);
+}
+
+function Staff::setProfile(profile) {
+  this.profile = profile;
+  this->setType(profile.humanoid_class);
+  if( this.humanoid_class != "Receptionist" ) {
+    this.attributes["fatigue"] = 0;
+  }
+  // The handyman has three additional attributes
+  if( this.humanoid_class == "Handyman" ) {
+    this.attributes["cleaning"] = 0.333;
+    this.attributes["watering"] = 0.333;
+    this.attributes["repairing"] = 0.333;
+  }
+  this->setLayer(5, profile.layer5);
+  this->updateStaffTitle();
+  this.waiting_for_staffroom = false; // Staff member has detected there is no staff room to rest.
+}
+
+function Staff::needsWorkStation() {
+  if( this.hospital && ! this.hospital.receptionist_msg ) {
+    if( this.humanoid_class == "Receptionist" && this.world.object_counts["reception_desk"] == 0 ) {
+      this.world.ui.adviser->say(_A.warnings.no_desk_4);
+      this.hospital.receptionist_msg = true;
+    }
+  }
+}
+
+function Staff::updateStaffTitle() {
+  var profile = this.profile;
+  if( profile.humanoid_class == "Doctor" ) {
+    var professions = "";
+    var number = 0;
+    if( profile.is_junior ) {
+      professions = _S.staff_title.junior .. " ";
+      number = 1;
+    } else if( profile.is_consultant ) {
+      professions = _S.staff_title.consultant .. " ";
+      number = 1;
+    }
+    if( profile.is_researcher >= 1.0 ) {
+      professions = professions .. _S.staff_title.researcher .. " ";
+      ++number    ;
+    }
+    if( profile.is_surgeon >= 1.0 ) {
+      professions = professions .. _S.staff_title.surgeon .. " ";
+      ++number    ;
+    }
+    if( profile.is_psychiatrist >= 1.0 ) {
+      if( number < 3 ) {
+        professions = professions .. _S.staff_title.psychiatrist;
+      } else {
+        professions = professions .. _S.dynamic_info.staff.psychiatrist_abbrev;
+      }
+    }
+
+    if( professions == "" ) {
+      professions = _S.staff_title.doctor;
+    }
+    this.profile.profession = professions;
+  }
+}
+
+// Function for increasing fatigue. Fatigue can be between 0 and 1,
+// so amounts here should be appropriately small comma values.
+function Staff::tire(amount) {
+  this->changeAttribute("fatigue", amount);
+  this->updateDynamicInfo();
+}
+
+// Function for decreasing fatigue. Fatigue can be between 0 and 1,
+// so amounts here should be appropriately small comma values.
+function Staff::wake(amount) {
+  this->changeAttribute("fatigue", -amount);
+  this->updateDynamicInfo();
+}
+
+// Update the movement speed
+function Staff::updateSpeed() {
+  var level = 2;
+  if( this.profile.is_junior ) {
+    level = 1;
+  } else if( this.profile.is_consultant ) {
+    level = 3;
+  }
+  var room = this->getRoom();
+  if( room && room.room_info.id == "training" ) {
+    level = 1;
+  } else if( this.attributes["fatigue"] ) {
+    if( this.attributes["fatigue"] >= 0.8 ) {
+      level -=   2;
+    } else if( this.attributes["fatigue"] >= 0.7 ) {
+      --level    ;
+    }
+  }
+  if( level >= 3 ) {
+    this.speed = "fast";
+    this.slow_animation = false;
+  } else if( level <= 1 ) {
+    this.speed = "slow";
+    this.slow_animation = true;
+  } else {
+    this.speed = "normal";
+    this.slow_animation = false;
+  }
+}
+
+// Check if fatigue is over a certain level (decided by the hospital policy),
+// and go to the StaffRoom if it is.
+function Staff::checkIfNeedRest() {
+  if( this.attributes["fatigue"] ) {
+    // Only when the staff member is very tired should the icon emerge. Unhappiness will also escalate
+    if( this.attributes["fatigue"] >= 0.7 ) {
+      this->setMood("tired", "activate");
+      this->changeAttribute("happiness", -0.0002);
+    }
+    // If above the policy threshold, go to the staff room.
+    if( this.attributes["fatigue"] >= this.hospital.policies["goto_staffroom"] &&
+        ! class.is(this->getRoom(), StaffRoom) ) {
+      // The staff will get unhappy if there is no staffroom to rest in.
+      if( this.waiting_for_staffroom ) {
+        this->changeAttribute("happiness", -0.001);
+      }
+      var room = this->getRoom();
+      if( (this.staffroom_needed && ((room && ! room->getPatient()) || ! room)) ||
+          (room && this.going_to_staffroom) ) {
+        if( this->getCurrentAction().name != "walk" && this->getCurrentAction().name != "queue" ) {
+          this.staffroom_needed = null;
+          this->goToStaffRoom();
+        }
+      }
+      // Abort if waiting for a staffroom to be built, waiting for the patient to leave,
+      // already going to staffroom or being picked up
+      if( this.waiting_for_staffroom || this.staffroom_needed ||
+          this.going_to_staffroom || this.pickup ) {
+        return;
+      }
+
+      // If no staff room exists, prevent further checks until one is built
+      if( ! this.world->findRoomNear(this, "staff_room") ) {
+        this.waiting_for_staffroom = true; // notifyNewRoom resets it when a staff room gets built.
+        return;
+      }
+
+      if( this.humanoid_class != "Handyman" && room && room->getPatient() ) {
+        // If occupied by patient, staff will go to the staffroom after the patient left.
+        this.staffroom_needed = true;
+      } else {
+        if( room ) {
+          room.staff_leaving = true;
+        }
+        this->goToStaffRoom();
+      }
+    }
+  }
+}
+
+function Staff::notifyNewRoom(room) {
+  if( room.room_info.id == "staff_room" ) {
+    this.waiting_for_staffroom = false;
+  }
+}
+
+function Staff::setCrazy(crazy) {
+  if( crazy ) {
+    // make doctor crazy
+    if( ! this.is_crazy ) {
+      this->setLayer(5, this.profile.layer5 + 4);
+      this.world.ui.adviser->say(_A.warnings.doctor_crazy_overwork);
+      this.is_crazy = true;
+    }
+  } else {
+    // make doctor sane
+    if( this.is_crazy ) {
+      if( this.humanoid_class == "Doctor" && ! (this.layers[5] < 5) ) {
+        this->setLayer(5, this.layers[5] - 4);
+        this.is_crazy = false;
+      }
+    }
+  }
+}
+
+function Staff::goToStaffRoom() {
+  // NB: going_to_staffroom set if (and only if) a seek_staffroom action is in the action_queue
+  this.going_to_staffroom = true;
+  if( this.task ) {
+    this.task.assignedHandyman = null;
+    this.task = null;
+  }
+  var room = this->getRoom();
+  if( room ) {
+    room.staff_leaving = true;
+    this->setNextAction(room->createLeaveAction());
+    this->queueAction(SeekStaffRoomAction());
+  } else {
+    this->setNextAction(SeekStaffRoomAction());
+  }
+}
+
+function Staff::onPlaceInCorridor() {
+  var world = this.world;
+  var notify_object = world->getObjectToNotifyOfOccupants(this.tile_x, this.tile_y);
+  if( notify_object ) {
+    notify_object->onOccupantChange(1);
+  }
+  // Assume that if the player puts someone in the corridor they don't want the
+  // staff member to primarily return to his/her old room.
+  this.last_room = null;
+  if( this.task ) {
+    this.task.assignedHandyman = null;
+    this.task = null;
+  }
+  this->updateSpeed();
+  this->setNextAction(MeanderAction());
+  if( this.humanoid_class == "Receptionist" ) {
+    world->findObjectNear(this, "reception_desk", null, function(x, y) {
+      var obj = world->getObject(x, y, "reception_desk");
+      return obj && obj->occupy(this);
+    });
+  }
+}
+
+// Sets the Hospital for a member of staff
+//!param hospital (Hospital) - hospital to assign to member of staff
+function Staff::setHospital(hospital) {
+  Humanoid.setHospital(this, hospital);
+  this->updateDynamicInfo();
+}
+
+var profile_attributes = {
+  Psychiatrist = "is_psychiatrist",
+  Surgeon = "is_surgeon",
+  Researcher = "is_researcher",
+};
+
+// Helper function to decide if Staff fulfills a criterion
+// (one of "Doctor", "Nurse", "Psychiatrist", "Surgeon", "Researcher" and "Handyman")
+function Staff::fulfillsCriterion(criterion) {
+  var class = this.humanoid_class;
+  if( criterion == "Doctor" ) {
+    if( class == "Doctor" || class == "Surgeon" ) {
+      return true;
+    }
+  } else if( criterion == "Nurse" ) {
+    if( class == "Nurse" ) {
+      return true;
+    }
+  } else if( criterion == "Psychiatrist" || criterion == "Surgeon" || criterion == "Researcher" ) {
+    if( this.profile && this.profile[profile_attributes[criterion]] == 1.0 ) {
+      return true;
+    }
+  } else if( criterion == "Handyman" ) {
+    if( class == "Handyman" ) {
+      return true;
+    }
+  } else {
+    error("Unknown criterion " .. criterion);
+  }
+  return false;
+}
+
+function Staff::adviseWrongPersonForThisRoom() {
+  var room = this->getRoom();
+  var room_name = room.room_info.long_name;
+  var required = (room.room_info.maximum_staff || room.room_info.required_staff);
+  if( this.humanoid_class == "Doctor" && room.room_info.id == "toilets" ) {
+    this.world.ui.adviser->say(_A.staff_place_advice.doctors_cannot_work_in_room->format(room_name));
+  } else if( this.humanoid_class == "Nurse" ) {
+    this.world.ui.adviser->say(_A.staff_place_advice.nurses_cannot_work_in_room->format(room_name));
+  } else if( this.humanoid_class == "Doctor" && ! room.room_info.id == "training" ) {
+    this.world.ui.adviser->say(_A.staff_place_advice.doctors_cannot_work_in_room->format(room_name));
+  } else if( required ) {
+    if( required.Nurse ) {
+      this.world.ui.adviser->say(_A.staff_place_advice.only_nurses_in_room->format(room_name));
+    } else if( required.Surgeon ) {
+      this.world.ui.adviser->say(_A.staff_place_advice.only_surgeons);
+    } else if( required.Researcher ) {
+      this.world.ui.adviser->say(_A.staff_place_advice.only_researchers);
+    } else if( required.Psychiatrist ) {
+      this.world.ui.adviser->say(_A.staff_place_advice.only_psychiatrists);
+    } else {
+      this.world.ui.adviser->say(_A.staff_place_advice.only_doctors_in_room->format(room_name));
+    }
+  }
+}
+
+// Function to decide if staff currently has nothing to do and can be called to a room where he's needed
+function Staff::isIdle() {
+  // Make sure we're not in an undesired state
+  if( ! this.hospital || this.fired ) {
+    return false;
+  }
+
+  if( this.on_call || this.pickup || this.going_to_staffroom || this.staffroom_needed ) {
+    return false;
+  }
+
+  if( this.waiting_on_other_staff ) {
+    return false;
+  }
+  // if they are using a door they are not idle, this stops doctors being considered for staff selection
+  // for rooms they have not completely left yet, fixes issue 810
+  if( this.user_of && this.user_of.object_type.id == "door" ) {
+    return false;
+  }
+
+  var room = this->getRoom();
+  if( room ) {
+    // in special rooms, never
+    if( room.room_info.id == "staff_room" || room.room_info.id == "research" ||
+        room.room_info.id == "training" ) {
+      return false;
+    }
+
+    // For handyman - just check the on_call flag
+    if( this.humanoid_class == "Handyman" && ! this.on_call ) {
+      return true;
+    }
+
+    // For other staff...
+    // in regular rooms (diagnosis / treatment), if no patient is in sight
+    // or if the only one in sight is actually leaving.
+    if( this.humanoid_class != "Handyman" && room.door.queue->patientSize() == 0 &&
+        ! this->getCurrentAction().is_leaving &&
+        ! (room.door.reserved_for && class.is(room.door.reserved_for, Patient)) ) {
+      if( room->getPatientCount() == 0 ) {
+        return true;
+      } else {
+        // It might still be the case that the patient is leaving
+        for( _, action in ipairs(room->getPatient().action_queue) ) {
+          if( action.is_leaving ) {
+            return true;
+          }
+        }
+      }
+    }
+  } else {
+    // In the corridor and not on_call (watering or going to room), the staff is free
+    // unless going back to the training room or research department.
+    var x, y = this->getCurrentAction().x, this->getCurrentAction().y;
+    if( x ) {
+      room = this.world->getRoom(x, y);
+      if( room && (room.room_info.id == "training" || room.room_info.id == "research") ) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+// Makes the staff member request a raise of 10%, or a wage exactly inbetween their current and a fair one, whichever is more.
+function Staff::requestRaise() {
+  // Is this the first time a member of staff is requesting a raise?
+  // Only show the help if the player is playing the campaign though
+  if( this.hospital && ! this.hospital.has_seen_pay_rise && tonumber(this.world.map.level_number) ) {
+    this.world.ui.adviser->say(_A.information.pay_rise);
+    this.hospital.has_seen_pay_rise = true;
+  }
+  // Check whether there is already a request for raise.
+  if( ! this->isMoodActive("pay_rise") ) {
+    var amount = math.floor(math.max(this.profile.wage * 1.1, (this.profile->getFairWage() + this.profile.wage) / 2) - this.profile.wage);
+    // At least for now, staff are timid, and only ask for raises 1/5th of the time
+    if( math.random(1, 5) != 1 || amount <= 0 ) {
+      this.timer_until_raise = null;
+      return;
+    }
+    this.quitting_in = 25*30; // Time until the staff members quits anyway
+    this->setMood("pay_rise", "activate");
+    this.world.ui.bottom_panel->queueMessage("strike", amount, this);
+  }
+}
+
+// Increases the wage of the staff member. Also increases happiness and clears
+// any request raise dialogs.
+//!param amount (integer) The amount, in game dollars per month, to increase
+// the salary by.
+function Staff::increaseWage(amount) {
+  this.profile.wage = this.profile.wage + amount;
+  this.world.ui->playSound("cashreg.wav");
+  if( this.profile.wage > 2000 ) { // What cap here?
+    this.profile.wage = 2000;
+  } else { // If the cap has been reached this member of staff won't get unhappy
+       // ever again...
+    this->changeAttribute("happiness", 0.99);
+    this->setMood("pay_rise", "deactivate");
+  }
+}
+
+function Staff::setDynamicInfoText(text) {
+  this.dynamic_text = text;
+  this->updateDynamicInfo();
+}
+
+function Staff::updateDynamicInfo() {
+  var fatigue_text = _S.dynamic_info.staff.tiredness;
+  if( ! this.attributes["fatigue"] ) {
+    fatigue_text = null;
+  }
+  this->setDynamicInfo('text', {
+    this.profile.profession,
+    this.dynamic_text && this.dynamic_text || "",
+    fatigue_text,
+  });
+  this->setDynamicInfo('progress', this.attributes["fatigue"]);
+  if( this.hospital ) {
+    this->setDynamicInfo('dividers', {this.hospital.policies["goto_staffroom"]});
+  }
+}
+
+function Staff::onDestroy() {
+  // Remove any message related to the staff member.
+  if( this.message_callback ) {
+    this->message_callback(true);
+    this.message_callback = null;
+  }
+  Humanoid.onDestroy(this);
+}
+
+function Staff::afterLoad(old, new) {
+  // Usage of going_to_staffroom flag changed slightly, so unset it.
+  // (should be safe even if someone is actually going to staffroom)
+  if( old < 27 ) {
+    this.going_to_staffroom = null;
+  }
+
+  if( old < 29 ) {
+    // Handymen could have "staffroom_needed" flag set due to a bug, unset it.
+    if( this.humanoid_class == "Handyman" ) {
+      this.staffroom_needed = null;
+    }
+  }
+
+  if( old < 64 ) {
+    // added reference to world for staff profiles
+    this.profile.world = this.world;
+  }
+  if( old < 68 ) {
+    if( this.attributes["fatigue"] ) {
+      if( this.attributes["fatigue"] >= this.hospital.policies["goto_staffroom"] ) {
+        this->goToStaffRoom();
+        this.going_to_staffroom = true;
+      }
+    }
+  }
+
+  if( old < 121 ) {
+    if( this.humanoid_class == "Handyman" && this.user_of && this.user_of.object_type.class == "Litter" ) {
+      var litter = this.user_of;
+      var hospital = this.world->getHospital(litter.tile_x, litter.tile_y);
+      var taskIndex = hospital->getIndexOfTask(litter.tile_x, litter.tile_y, "cleaning", litter);
+      hospital->removeHandymanTask(taskIndex, "cleaning");
+    }
+  }
+
+  Humanoid.afterLoad(this, old, new);
+}
+
+function Staff::interruptHandymanTask() {
+  this->setDynamicInfoText("");
+  if( this.on_call ) {
+    this.on_call.assigned = null;
+    this.on_call = null;
+  }
+  this.task = null;
+  this->setNextAction(AnswerCallAction());
+}
+
+function Staff::searchForHandymanTask() {
+  this.task = null;
+  var nr = math.random();
+  var task, task2, task3;
+  var assignedTask = false;
+  if( nr < this.attributes["cleaning"] ) {
+    task, task2, task3 = "cleaning", "watering", "repairing";
+  } else if( nr < this.attributes["cleaning"] + this.attributes["watering"] ) {
+    task, task2, task3 = "watering", "cleaning", "repairing";
+  } else {
+    task, task2, task3 = "repairing", "watering", "cleaning";
+  }
+  var index = this.hospital->searchForHandymanTask(this, task);
+  if( index != -1 ) {
+    this->assignHandymanTask(index, task);
+    assignedTask = true;
+  } else {
+    if( this.attributes[task] < 1 ) {
+      var sum = this.attributes[task2] + this.attributes[task3];
+      if( math.random(0, math.floor(sum * 100)) > math.floor(this.attributes[task2] * 100) ) {
+        task2, task3 =  task3, task2;
+      }
+      index = this.hospital->searchForHandymanTask(this, task2);
+      if( index != -1 ) {
+        this->assignHandymanTask(index, task2);
+        assignedTask = true;
+      } else if( this.attributes[task3] > 0 ) {
+        index = this.hospital->searchForHandymanTask(this, task3);
+        if( index != -1 ) {
+          this->assignHandymanTask(index, task3);
+          assignedTask = true;
+        }
+      }
+    }
+  }
+  if( assignedTask == false ) {
+    // Make sure that the handyman isn't meandering already.
+    for( _, action in ipairs(this.action_queue) ) {
+      if( action.name == "meander" ) {
+        return false;
+      }
+    }
+    if( this->getRoom() ) {
+      this->queueAction(this->getRoom()->createLeaveAction());
+    }
+    this->queueAction(MeanderAction());
+  }
+  return assignedTask;
+}
+
+function Staff::assignHandymanTask(taskIndex, taskType) {
+  this.hospital->assignHandymanToTask(this, taskIndex, taskType);
+  var task = this.hospital->getTaskObject(taskIndex, taskType);
+  this.task = task;
+  if( taskType == "cleaning" ) {
+    if( this->getRoom() ) {
+      this->setNextAction(this->getRoom()->createLeaveAction());
+      this->queueAction(WalkAction(task.tile_x, task.tile_y));
+    } else {
+      this->setNextAction(WalkAction(task.tile_x, task.tile_y));
+    }
+    this->queueAction(SweepFloorAction(task.object));
+    this->queueAction(AnswerCallAction());
+  } else {
+    if( task.call.dropped ) {
+      task.call.dropped = null;
+    }
+    task.call.dispatcher->executeCall(task.call, this);
+  }
+}
+
+function Staff::getDrawingLayer() {
+  if( this.humanoid_class == "Receptionist" ) {
+    var direction = this.last_move_direction;
+    if( direction == "west" || direction == "north" ) {
+      return 5;
+    }
+    return 3;
+  } else {
+    return 4;
+  }
+}
+
+//! Estimate staff service quality based on skills, fatigue and happiness.
+//!return (float) between [0-1] indicating quality of the service.
+function Staff::getServiceQuality() {
+  // weights
+  var skill_weight = 0.7;
+  var fatigue_weight = 0.2;
+  var happiness_weight = 0.1;
+
+  var weighted_skill = skill_weight * this.profile.skill;
+  var weighted_fatigue = fatigue_weight * this.attributes["fatigue"];
+  var weighted_happiness = happiness_weight * this.attributes["happiness"];
+
+  return weighted_skill + weighted_fatigue + weighted_happiness;
+}
+
+/* Return string representation
+! Adds Doctor statistics for a "Doctor" object
+!return (string)
+*/
+function Staff::tostring() {
+  var result = Humanoid.tostring(this);
+  if( this.humanoid_class == "Doctor" ) {
+    result = result .. string.format("\nSkills: (%.3f)  Surgeon (%.3f)  Psych (%.3f)  Researcher (%.3f)",
+      this.profile.skill || 0,
+      this.profile.is_surgeon || 0,
+      this.profile.is_psychiatrist || 0,
+      this.profile.is_researcher || 0);
+  }
+  return result;
+}
+
+// Dummy callback for savegame compatibility
+var callbackNewRoom = /*persistable:staff_build_staff_room_callback*/ function(room) { };

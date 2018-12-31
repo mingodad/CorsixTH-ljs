@@ -1,0 +1,207 @@
+/* Copyright (c) 2010 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var lfs = require("lfs");
+var TH = require("TH");
+var lfsext = TH.lfsExt();
+
+//! A tree node representing a directory in the physical file-system.
+class ("DirTreeNode") (FileTreeNode);
+
+//-@type DirTreeNode
+var DirTreeNode = _G["DirTreeNode"];
+
+function DirTreeNode::DirTreeNode(path) {
+  this->FileTreeNode(path);
+}
+
+function DirTreeNode::isValidFile(name) {
+  // Check parent criteria and that it's a directory.
+  if( FileTreeNode.isValidFile(this, name) &&
+      lfs.attributes(this->childPath(name), "mode") == "directory" ) {
+    // Make sure that we are allowed to read the directory.
+    var status, _ = pcall(lfs.dir, this->childPath(name));
+    return status;
+  }
+}
+
+function DirTreeNode::getSelectColour(canvas) {
+  if( this.is_valid_directory ) {
+    return this.highlight_colour;
+  } else {
+    return canvas->mapRGB(174, 166, 218);
+  }
+}
+
+
+
+
+//! This tree only shows directories and highlights valid TH directories.
+class ("InstallDirTreeNode") (DirTreeNode);
+
+//-@type InstallDirTreeNode
+var InstallDirTreeNode = _G["InstallDirTreeNode"];
+
+function InstallDirTreeNode::InstallDirTreeNode(path) {
+  this->FileTreeNode(path);
+}
+
+function InstallDirTreeNode::createNewNode(path) {
+  return InstallDirTreeNode(path);
+}
+
+function InstallDirTreeNode::select() {
+  // Do nothing as an override. getHighlightColour solves this instead.
+}
+
+function InstallDirTreeNode::getHighlightColour(canvas) {
+  var highlight_colour = this.highlight_colour;
+  if( highlight_colour == null ) {
+    highlight_colour = false;
+
+    if( this->getLevel() == 0 && ! this.has_looked_for_children ) {
+      // Assume root-level things are not TH directories, unless we've already
+      // got a list of their children.
+      highlight_colour = null;
+    } else if( this->getChildCount() >= 3 ) {
+      var ngot = 0;
+      var things_to_check = {"data", "levels", "qdata"};
+      for( _, thing in ipairs(things_to_check) ) {
+        if( ! this.children[thing->lower()] ) {
+          break;
+        } else {
+          ++ngot    ;
+        }
+      }
+      if( ngot == 3 ) {
+        highlight_colour = canvas->mapRGB(0, 255, 0);
+        this.is_valid_directory = true;
+      }
+    }
+    this.highlight_colour = highlight_colour;
+  }
+  return highlight_colour || null;
+}
+
+//! Prompter for Theme Hospital install directory
+class ("UIDirectoryBrowser") (UIResizable);
+
+//-@type UIDirectoryBrowser
+var UIDirectoryBrowser = _G["UIDirectoryBrowser"];
+
+//! Creates a new directory browser window
+//!param ui The active UI to hook into.
+//!param mode Whether the dialog has been opened from the main_menu or somewhere else. Currently
+//! valid are "menu" or "dir_browser".
+//!param instruction The textual instruction what the user should do in the dialog.
+//!param treenode_class What TreeNode subclass the nodes will be built from. E.g. "InstallDirTreeNode"
+//!param callback The function that is called when the user has chosen a directory. Gets
+//! a path string as argument.
+function UIDirectoryBrowser::UIDirectoryBrowser(ui, mode, instruction, treenode_class, callback) {
+  this.col_bg = {
+    red = 154,
+    green = 146,
+    blue = 198,
+  };
+  this.col_scrollbar = {
+    red = 164,
+    green = 156,
+    blue = 208,
+  };
+
+  this->UIResizable(ui, 500, 423, this.col_bg, mode == null && true || false);
+  this.ui = ui;
+  this.mode = mode;
+  this.instruction = instruction;
+  this->setSize(500, 423);
+  this->addColourPanel(0, 0, this.width, this.height, this.col_bg.red, this.col_bg.green, this.col_bg.blue);
+
+  this.modal_class = mode == "menu" && "main menu" || "dir browser";
+  this.resizable = false;
+  this.exit_button = this->addBevelPanel(260, 400, 100, 18, this.col_bg);
+
+  if( mode != null ) {
+    this.font = TheApp.gfx->loadFont("QData", "Font01V");
+    this->setDefaultPosition(0.5, 0.25);
+    this.on_top = true;
+    this.esc_closes = true;
+    this.exit_button->setLabel(_S.install.cancel, this.font)->makeButton(0, 0, 100, 18, null, this.close);
+  } else {
+    this.font = ui.app.gfx->loadBuiltinFont();
+    this->setDefaultPosition(0.05, 0.5);
+    this->addKeyHandler("escape", this.exit);
+    this.exit_button->setLabel(_S.install.exit, this.font)->makeButton(0, 0, 100, 18, null, this.exit);
+  }
+
+  // Create the root item (or items, on Windows), and set it as the
+  // first_visible_node.
+  var root;
+  var roots = lfsext.volumes();
+  if( #roots > 1 ) {
+    for( k, v in pairs(roots) ) {
+      roots[k] = _G[treenode_class](v);
+    }
+    root = DummyRootNode(roots);
+  } else {
+    root = _G[treenode_class](roots[1]);
+  }
+
+  var select_function = function(node) {
+    if( node.is_valid_directory ) {
+      callback(node.path);
+      this->close();
+    }
+  };
+
+  var control = TreeControl(root, 5, 55, 490, 340, this.col_bg, this.col_scrollbar)
+    ->setSelectCallback(select_function);
+
+  var ok_function = function() {
+    if( control.selected_node ) {
+      select_function(control.selected_node);
+    }
+  };
+  this.ok_button = this->addBevelPanel(130, 400, 100, 18, this.col_bg)
+    ->setLabel(_S.install.ok, this.font)->makeButton(0, 0, 100, 18, null, ok_function);
+
+  this->addWindow(control);
+}
+
+function UIDirectoryBrowser::exit() {
+  this.ui.app->exit();
+}
+
+function UIDirectoryBrowser::close() {
+  UIResizable.close(this);
+  if( this.mode == "menu" ) {
+    this.ui->addWindow(UIFolder(this.ui, "menu"));
+  }
+}
+
+function UIDirectoryBrowser::draw(canvas, x, y) {
+  UIResizable.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+  if( ! this.mode ) {
+    this.font->drawWrapped(canvas, _S.install.title, x + 5, y + 5, this.width - 10, "center");
+    this.font->drawWrapped(canvas, this.instruction, x + 5, y + 15, this.width - 10);
+  } else {
+    this.font->drawWrapped(canvas, this.instruction, x + 5, y + 15, this.width - 10);
+  }
+}

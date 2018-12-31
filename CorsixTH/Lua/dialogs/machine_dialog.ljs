@@ -1,0 +1,166 @@
+/* Copyright (c) 2009 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("UIMachine") (Window);
+
+//-@type UIMachine
+var UIMachine = _G["UIMachine"];
+
+function UIMachine::UIMachine(ui, machine, room) {
+  this->Window();
+
+  var app = ui.app;
+  this.esc_closes = true;
+  this.machine = machine;
+  this.room = room;
+  this.ui = ui;
+  this.modal_class = "humanoid_info";
+  this.width = 188;
+  this.height = 206;
+  this->setDefaultPosition(-20, 30);
+  this.panel_sprites = app.gfx->loadSpriteTable("QData", "Req03V", true);
+  this.white_font = app.gfx->loadFont("QData", "Font01V");
+
+  this->addPanel(333,    0,   0); // Dialog header
+  this->addPanel(334,    0,  74); // The next part
+  for( y = 131, 180, 7 ) {
+    this->addPanel(335,  0,   y); // Some background
+  }
+  this->addPanel(336,   0,  182); // Dialog footer
+
+  // Call button
+  this->addPanel(339, 20, 127)
+    ->makeButton(0, 0, 63, 60, 340, this.callHandyman)
+    ->setTooltip(_S.tooltip.machine_window.repair)
+    ->setSound("selectx.wav");
+  // Replace button
+  this->addPanel(341, 92, 127)
+    ->makeButton(0, 0, 45, 60, 342, this.replaceMachine)
+    ->setTooltip(_S.tooltip.machine_window.replace)
+    ->setSound("selectx.wav");
+  // Close button
+  this->addPanel(337, 146,  18)->makeButton(0, 0, 24, 24, 338, this.close)
+    ->setTooltip(_S.tooltip.machine_window.close);
+
+  this->makeTooltip(_S.tooltip.machine_window.name, 18, 19, 139, 42);
+  this->makeTooltip(_S.tooltip.machine_window.times_used, 18, 49, 139, 77);
+  this->makeTooltip(_S.tooltip.machine_window.status, 24, 88, 128, 115);
+}
+
+function UIMachine::draw(canvas, x, y) {
+  Window.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+  var mach = this.machine;
+
+  var font = this.white_font;
+  var output;
+  if( this.room.needs_repair ) {
+    output = "(" .. mach.object_type.name .. ")";
+  } else {
+    output = mach.object_type.name;
+  }
+  font->draw(canvas, output, x + 27, y + 27); // Name
+  font->draw(canvas, mach.total_usage, x + 60, y + 59); // Total number of times used
+
+  var status_bar_width = math.floor((1 - mach.times_used/mach.strength) * 40 + 0.5);
+  if( status_bar_width != 0 ) {
+    for( dx = 0, status_bar_width - 1 ) {
+      this.panel_sprites->draw(canvas, 352, x + 53 + dx, y + 99); // Or 5
+    }
+  }
+}
+
+function UIMachine::callHandyman() {
+  if( this.machine.times_used != 0 ) {
+    var taskIndex = this.machine.hospital->getIndexOfTask(this.machine.tile_x, this.machine.tile_y, "repairing");
+    if( taskIndex == -1 ) {
+      var call = this.ui.app.world.dispatcher->callForRepair(this.machine, false, true);
+      this.machine.hospital->addHandymanTask(this.machine, "repairing", 2, this.machine.tile_x, this.machine.tile_y, call);
+    } else {
+      this.machine.hospital->modifyHandymanTaskPriority(taskIndex, 2, "repairing");
+    }
+  }
+}
+
+function UIMachine::replaceMachine() {
+  var machine = this.machine;
+  var hosp = this.ui.hospital;
+  var cost = hosp.research.research_progress[machine.object_type].cost;
+  if( this.ui.hospital.balance < cost ) {
+    // give visual warning that player doesn't have enough $ to buy
+    this.ui.adviser->say(_A.warnings.cannot_afford_2, false, true);
+    this.ui->playSound("wrong2.wav");
+    return;
+  }
+  this.ui->addWindow(UIConfirmDialog(this.ui,
+    _S.confirmation.replace_machine->format(machine.object_type.name, cost),
+    /*persistable:replace_machine_confirm_dialog*/function() {
+      // Charge for new machine
+      hosp->spendMoney(cost, _S.transactions.machine_replacement);
+
+      // Tell the machine to pretend it's a shiny new one
+      machine->machineReplaced();
+    }
+  ));
+}
+
+function UIMachine::onMouseDown(code, x, y) {
+  // cycle through all machines when you right click on the machine title
+  if( code == "right" ) {
+    if( x > 18 && x < 139 ) {
+      if( y > 19 && y < 42 ) {
+        // select next machine
+        var ui = this.ui;
+        var first_machine, next_machine = null, this.machine;
+        var next_room;
+        for( _, entity in ipairs(ui.app.world.entities) ) {
+          // is a machine and not a slave (e.g. operating_table_b)
+          if( class.is(entity, Machine) && ! entity.master ) {
+            next_room = entity->getRoom();
+            if( next_room.is_active ) {
+              if( ! first_machine ) {
+                first_machine = entity;
+              }
+              if( ! next_machine ) {
+                next_machine = entity;
+                break;
+              } else if( entity == next_machine ) {
+                next_machine = null;
+              }
+            }
+          }
+        }
+        if( ! next_machine || next_machine == this.machine ) {
+          next_machine = first_machine;
+        }
+        if( next_machine && next_machine != this.machine ) {
+          // center screen on machine
+          var sx, sy = ui.app.map->WorldToScreen(next_machine.tile_x, next_machine.tile_y);
+          var dx, dy = next_machine.th->getPosition();
+          ui->scrollMapTo(sx + dx, sy + dy);
+          // change window
+          ui->addWindow(UIMachine(ui, next_machine, next_room));
+          ui->playSound("camclick.wav");
+        }
+      }
+    }
+  }
+  return Window.onMouseDown(this, code, x, y);
+}

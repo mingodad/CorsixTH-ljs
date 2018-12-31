@@ -1,0 +1,312 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Manages a list of `Humanoid`s which are waiting to use an `Object`.
+//! A queue stores a list of humanoids waiting to use an object.
+// For a reception desk, this is as expected.
+// For a room, the queue is for the door, not the room. Hence the queue stores
+// the list of patients waiting to enter (the traditional queue for the room),
+// the list of staff waiting to enter (because of the door being in use for
+// example), the list of staff and patients waiting to leave (again due to door
+// being in use).
+// Queues are currently implemented as normal Lua arrays, but you should access
+// a queue via its methods rather than directly.
+class ("Queue");
+
+//-@type Queue
+var Queue = _G["Queue"];
+
+//! Constructor of a queue.
+function Queue::Queue() {
+  this.reported_size = 0;   // Number of real patients
+  this.expected = {};       // Expected patients
+  this.callbacks = {};
+  this.expected_count = 0;  // Number of expected patients
+  this.visitor_count = 0;
+  this.max_size = 6;        // Maximum queue length (default value)
+  this.bench_threshold = 0;
+}
+
+//! A humanoid is expected in a queue.
+//!param humanoid New patient that is expected.
+function Queue::expect(humanoid) {
+  if( ! this.expected[humanoid] && ! class.is(humanoid, Vip) ) {
+    this.expected[humanoid] = true;
+    this.expected_count = this.expected_count + 1;
+  }
+}
+
+//! A humanoid is canceled as expected in a queue.
+//!param humanoid Patient that is not coming to this queue.
+function Queue::unexpect(humanoid) {
+  if( this.expected[humanoid] ) {
+    this.expected[humanoid] = null;
+    this.expected_count = this.expected_count - 1;
+  }
+}
+
+//! Lower the max queue length.
+//!param amount (int) Decrement length value of the queue.
+function Queue::decreaseMaxSize(amount) {
+  this.max_size = math.max(0, this.max_size - amount);
+}
+
+//! Increase max queue length.
+//!param amount (int) Increment length value of the queue.
+function Queue::increaseMaxSize(amount) {
+  this.max_size = math.min(30, this.max_size + amount);
+}
+
+function Queue::setBenchThreshold(standing_count) {
+  this.bench_threshold = standing_count;
+}
+
+//! Set max queue length.
+//!param queue_count (int) New max queue length to set.
+function Queue::setMaxQueue(queue_count) {
+  this.max_size = queue_count;
+}
+
+//! Total size of the queue, which are various people wanting in or out of the room.
+//! For a true patient queue count, use Queue:reportedSize.
+//!return (int) Number of various people in the queue.
+function Queue::size() {
+  // Rememeber, the size includes people waiting to leave and staff waiting to enter
+  // For just the patients waiting to enter, use Queue:reportedSize()
+  // Most of the time, size() == reportedSize(), so it won't be immediately obvious
+  // if you're using the wrong method, but from time to time, staff or exiting
+  // patients will be in the queue, at which point the sizes will differ.
+  return #this;
+}
+
+//! Retrieve whether the queue is full.
+//!return (boolean) Whether the queue is full.
+function Queue::isFull() {
+  return #this >= this.max_size;
+}
+
+//! Get the number of real patients in the queue.
+//!return (int) Number of real patients in the queue.
+function Queue::reportedSize() {
+  return this.reported_size;
+}
+
+//! Get the number of expected patients.
+//!return (int) Number of expected patients (in the near future).
+function Queue::expectedSize() {
+  return this.expected_count;
+}
+
+//! Check if the queue has an emergency patient.
+//!return (boolean) Whether an emergency patient was found in the queue.
+function Queue::hasEmergencyPatient() {
+  for( _, humanoid in ipairs(this) ) {
+    if( humanoid.is_emergency ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+//! Retrieve the total number of queued and expected patients.
+//return (int) Number of patients.
+function Queue::patientSize() {
+  return this.reported_size + this.expected_count;
+}
+
+//! Get the 'index' real patient.
+//!param index (int) Index of the patient to retrieve (runs up to Queue:reportedSize).
+//!return Patient at the queried point in the queue.
+function Queue::reportedHumanoid(index) {
+  return this[#this - this.reported_size + index];
+}
+
+function Queue::setPriorityForSameRoom(entity) {
+  this.same_room_priority = entity;
+}
+
+function Queue::push(humanoid, callbacks_on) {
+  var index = #this + 1;
+  var increment_reported_size = true;
+  if( this.same_room_priority ) {
+    // If humanoid in the priority room, then position them in the queue before
+    // humanoids not in the room (because if they are in the room and in the
+    // queue, then they are trying to leave the room).
+    var room = this.same_room_priority->getRoom();
+    if( humanoid->getRoom() == room ) {
+      while( index > 1 ) {
+        var before = this[index - 1];
+        if( before->getRoom() == room ) {
+          break;
+        }
+        --index    ;
+      }
+      increment_reported_size = false;
+    }
+  }
+  if( class.is(humanoid, Staff) ) {
+    // Give staff priority over patients
+    while( index > 1 ) {
+      var before = this[index - 1];
+      if( class.is(before, Staff) ) {
+        break;
+      }
+      --index    ;
+    }
+    increment_reported_size = false;
+  }
+  // Emergencies and any VIP's get put before all the other patients, but AFTER currently queued emergencies.
+  if( humanoid.is_emergency || class.is(humanoid, Vip) || class.is(humanoid, Inspector) ) {
+    while( index > 1 ) {
+      var before = this[index - 1];
+      if( before.is_emergency ) {
+        break;
+      }
+      --index    ;
+    }
+  }
+  if( increment_reported_size ) {
+    this.reported_size = this.reported_size + 1;
+  }
+  this.callbacks[humanoid] = callbacks_on;
+  table.insert(this, index, humanoid);
+  for( i = index + 1, #this ) {
+    var queued_humanoid = this[i];
+    var callbacks = this.callbacks[queued_humanoid];
+    if( callbacks ) {
+      callbacks->onChangeQueuePosition(queued_humanoid);
+    }
+  }
+}
+
+//! Get the first person in the queue (queue is not changed).
+//! Note that first person may not be a patient, use Queue:reportedHumanoid to get patients
+//!return First person in the queue.
+function Queue::front() {
+  return this[1];
+}
+
+//! Get the last person in the queue (queue is not changed).
+//!return Last person in the queue.
+function Queue::back() {
+  return this[#this];
+}
+
+//! Pop first person from the queue.
+//! Note that first person may not be a patient, use Queue:reportedHumanoid to get patients
+//!return First person in the queue.
+function Queue::pop() {
+  if( this.reported_size == #this ) {
+    this.reported_size = this.reported_size - 1;
+  }
+  var oldfront = this[1];
+  table.remove(this, 1);
+  oldfront->setMood("queue", "deactivate");
+  var callbacks = this.callbacks[oldfront];
+  if( callbacks ) {
+    callbacks->onLeaveQueue(oldfront);
+  }
+  this.callbacks[oldfront] = null;
+  for( _, humanoid in ipairs(this) ) {
+    callbacks = this.callbacks[humanoid];
+    if( callbacks ) {
+      callbacks->onChangeQueuePosition(humanoid);
+    }
+  }
+  return oldfront;
+}
+
+//! Remove person from the queue by index number.
+//! Note that the person may not be a patient.
+//!param index (jnt) Index in the queue of the person to remove.
+//!return The removed person.
+function Queue::remove(index) {
+  if( this[index] == null ) {
+    return;
+  }
+  var value = this[index];
+  if( index > #this - this.reported_size ) {
+    this.reported_size = this.reported_size - 1;
+  }
+  value->setMood("queue", "deactivate");
+  table.remove(this, index);
+  this.callbacks[value] = null;
+  for( i = #this, index, -1 ) {
+    var humanoid = this[i];
+    if( humanoid.onAdvanceQueue ) {
+      humanoid->onAdvanceQueue(this, i - 1);
+    }
+  }
+  return value;
+}
+
+//! Remove a person by value from the queue.
+//!param value Person to remove.
+//!return Whether the person could be found (and was removed).
+function Queue::removeValue(value) {
+  for( i = 1, #this ) {
+    if( this[i] == value ) {
+      this->remove(i);
+      return true;
+    }
+  }
+  return false;
+}
+
+//! Move the person at position 'index' to position 'new_index'.
+//! Persons between 'index' and 'new_index' move one place to 'index'.
+//!param index (int) Index number of the person to move.
+//!param new_index (int) Destination of the person being moved.
+function Queue::move(index, new_index) {
+  if( this[index] == null || this[new_index] == null || index == new_index ) {
+    return;
+  }
+
+  var i;
+  if( new_index < index ) {
+    i = -1;
+  } else {
+    i = 1;
+  }
+
+  while( new_index != index ) {
+    var temp = this[index + i];
+    this[index + i] = this[index];
+    this[index] = temp;
+    index +=   i;
+  }
+}
+
+//! Called when reception desk is destroyed, or when a room is destroyed from a crashed machine.
+function Queue::rerouteAllPatients(action) {
+  for( _, humanoid in ipairs(this) ) {
+    // slight delay so the desk is really destroyed before rerouting
+    humanoid->setNextAction(IdleAction()->setCount(1));
+    // Don't queue the same action table, but clone it for each patient.
+    var clone = {};
+    for( k, v in pairs(action) ) { clone[k] = v; }
+    humanoid->queueAction(clone);
+  }
+  for( humanoid in pairs(this.expected) ) {
+    humanoid->setNextAction(IdleAction()->setCount(1));
+    humanoid->queueAction(action);
+    this->unexpect(humanoid);
+  }
+}

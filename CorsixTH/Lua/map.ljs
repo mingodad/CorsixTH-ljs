@@ -1,0 +1,781 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Lua extensions to the C++ THMap class
+class ("Map");
+
+//-@type Map
+var Map = _G["Map"];
+
+var pathsep = package.config->sub(1, 1);
+var math_floor, tostring, table_concat
+    = math.floor, tostring, table.concat;
+var thMap = require("TH").map;
+
+function Map::Map(app) {
+  this.width = false;
+  this.height = false;
+  this.th = thMap();
+  this.app = app;
+  this.debug_text = false;
+  this.debug_flags = false;
+  this.debug_font = false;
+  this.debug_tick_timer = 1;
+  this->setTemperatureDisplayMethod(app.config.warmth_colors_display_default);
+}
+
+var flag_cache = {};
+
+//! Get the value of the given flag from the tile at x, y in the map.
+//!param x (int) Horizontal position of the tile to query in the map.
+//!param x (int) Vertical position of the tile to query in the map.
+//!param flag (string) Name of the queried flag.
+//!return (?) value of the queried flag.
+function Map::getCellFlag(x, y, flag) {
+  return this.th->getCellFlags(math.floor(x), math.floor(y), flag_cache)[flag];
+}
+
+//! Get the ID of the room of the tile at x, y in the map.
+//!param x (int) Horizontal position of the tile to query in the map.
+//!param x (int) Vertical position of the tile to query in the map.
+//!return ID of the room at the queried tile.
+function Map::getRoomId(x, y) {
+  return this.th->getCellFlags(math.floor(x), math.floor(y)).roomId;
+}
+
+function Map::setPlayerCount(count) {
+  this.th->setPlayerCount(count);
+}
+
+function Map::getPlayerCount(count) {
+  this.th->getPlayerCount(count);
+}
+
+//! Set the camera tile for the given player on the map
+//!param x (int) Horizontal position of tile to set camera on
+//!param y (int) Vertical position of the tile to set the camera on
+//!param player (int) Player number (1-4)
+function Map::setCameraTile(x, y, player) {
+  this.th->setCameraTile(x, y, player);
+}
+
+//! Set the heliport tile for the given player on the map
+//!param x (int) Horizontal position of tile to set heliport on
+//!param y (int) Vertical position of the tile to set the heliport on
+//!param player (int) Player number (1-4)
+function Map::setHeliportTile(x, y, player) {
+  this.th->setHeliportTile(x, y, player);
+}
+
+//! Set how to display the room temperature in the hospital map.
+//!param method (int) Way of displaying the temperature. See also THMapTemperatureDisplay enum.
+//! 1=red gradients, 2=blue/green/red colour shifts, 3=yellow/orange/red colour shifts
+function Map::setTemperatureDisplayMethod(method) {
+  if( method != 1 && method != 2 && method != 3 ) {
+    method = 1;
+  }
+  this.temperature_display_method = method;
+  this.app.config.warmth_colors_display_default = method;
+  this.th->setTemperatureDisplay(method);
+}
+
+//! Copy the temperature display method from the Lua data, if available, else use the default.
+function Map::registerTemperatureDisplayMethod() {
+  if( ! this.temperature_display_method ) {
+    this->setTemperatureDisplayMethod(this.app.config.warmth_colors_display_default);
+  }
+  this.th->setTemperatureDisplay(this.temperature_display_method);
+}
+
+// Convert between world co-ordinates and screen co-ordinates
+// World co-ordinates are (at least for standard maps) in the range [1, 128)
+// for both x and y, with the floor of the values giving the cell index.
+// Screen co-ordinates are pixels relative to the map origin - NOT relative to
+// the top-left corner of the screen (use UI:WorldToScreen and UI:ScreenToWorld
+// for this).
+
+function Map::WorldToScreen(x, y) {
+  if( x == null ) { x = 0; }
+  if( y == null ) { y = 0; }
+
+  // Adjust origin from (1, 1) to (0, 0) and then linear transform by matrix:
+  // 32 -32
+  // 16  16
+  return 32 * (x - y), 16 * (x + y - 2);
+}
+
+function Map::ScreenToWorld(x, y) {
+  // Transform by matrix: (inverse of the WorldToScreen matrix)
+  //  1/64 1/32
+  // -1/64 1/32
+  // And then adjust origin from (0, 0) to (1, 1)
+  y = y / 32 + 1;
+  x /=   64;
+  var tile_x, tile_y = y + x, y - x;
+  if( this.width != null && this.height != null ) {
+    if( tile_x < 1 ) { tile_x = 1; }
+    if( tile_x > this.width ) { tile_x = this.width; }
+    if( tile_y < 1 ) { tile_y = 1; }
+    if( tile_y > this.height ) { tile_y = this.height; }
+  }
+  return tile_x, tile_y;
+}
+
+var function bits(n) {
+  var vals = {};
+  var m = 256;
+  while( m >= 1 ) {
+    if( n >= m ) {
+      vals[#vals + 1] = m;
+      n -=   m;
+    }
+    m /=   2;
+  }
+  if( vals[1] ) {
+    return unpack(vals);
+  } else {
+    return 0;
+  }
+}
+
+/*! Loads the specified level. If a string is passed it looks for the file with the same name
+ in the "Levels" and/or "Campaigns" folder of CorsixTH, if it is a number it tries to load
+ that level from the original game.
+!param level (string or int) The name (or number) of the level to load. If this is a number the game assumes
+the original game levels are considered.
+!param level_name (string) The name of the actual map/area/hospital as written in the config file.
+!param map_file (string) The path to the map file as supplied by the config file.
+!param level_intro (string) If loading a custom level this message will be shown as soon as the level
+has been loaded.
+*/
+function Map::load(level, difficulty, level_name, map_file, level_intro, map_editor) {
+  var objects;
+  if( ! difficulty ) {
+    difficulty = "full";
+  }
+  // Load CorsixTH base configuration for all levels.
+  // We want to load the file again each time.
+  var function file (filename) {
+      var f = assert(loadfile(filename));
+      return f();
+    }
+  var path = debug.getinfo(1, "S").source->sub(2, -12);
+  var result = file(path .. "Lua" .. pathsep .. "base_config.ljs");
+
+  var base_config = result;
+  var _;
+  if( type(level) == "number" ) {
+    var errors, data;
+    // Playing the original campaign.
+    // Add TH's base config if possible, otherwise our own config
+    // roughly corresponds to "full".
+    errors, base_config = this->loadMapConfig(difficulty .. "00.SAM", base_config);
+    // If it couldn't be loaded the new difficulty level is full no matter what.
+    if( errors ) {
+      difficulty = "full";
+    }
+    this.difficulty = difficulty;
+    this.level_number = level;
+    data, errors = this->getRawData(map_file);
+    if( data ) {
+      _, objects = this.th->load(data);
+    } else {
+      return null, errors;
+    }
+    this.level_name = _S.level_names[level]->upper();
+    // Check if we're using the demo files. If we are, that special config should be loaded.
+    if( this.app.using_demo_files ) {
+      // Try to load our own configuration file for the demo.
+      var p = debug.getinfo(1, "S").source->sub(2, -12) .. "Levels" .. pathsep .. "demo.level";
+      errors, result = this->loadMapConfig(p, base_config, true);
+      if( errors ) {
+        print("Warning: Could not find the demo configuration, try reinstalling the game");
+      }
+      this.level_config = result;
+    } else {
+      var level_no = level;
+      if( level_no < 10 ) {
+        level_no = "0" .. level;
+      }
+      // Override with the specific configuration for this level
+      _, result = this->loadMapConfig(difficulty .. level_no .. ".SAM", base_config);
+      // Finally load additional CorsixTH config per level
+      var p = debug.getinfo(1, "S").source->sub(2, -12) .. "Levels" .. pathsep .. "original" .. level_no .. ".level";
+      _, result = this->loadMapConfig(p, result, true);
+      this.level_config = result;
+    }
+  } else if( map_editor ) {
+    // We're being fed data by the map editor.
+    this.level_name = "MAP EDITOR";
+    this.level_number = "MAP EDITOR";
+    if( level == "" ) {
+      _, objects = this.th->loadBlank();
+    } else {
+      var data, errors = this->getRawData(level);
+      if( data ) {
+        _, objects = this.th->load(data);
+      } else {
+        return null, errors;
+      }
+    }
+    assert(base_config, "No base config has been loaded!");
+
+    this.level_config = base_config;
+  } else {
+    // We're loading a custom level.
+    this.level_name = level_name;
+    this.level_intro = level_intro;
+    this.level_number = level;
+    this.map_file = map_file;
+    var data, errors = this->getRawData(map_file);
+    if( data ) {
+      _, objects = this.th->load(data);
+    } else {
+      return null, errors;
+    }
+    assert(base_config, "No base config has been loaded!");
+    errors, result = this->loadMapConfig(this.app->getAbsolutePathToLevelFile(level), base_config, true);
+    if( errors ) {
+      print(errors);
+    }
+    this.level_config = result;
+  }
+
+  this.width, this.height = this.th->size();
+
+  this.parcelTileCounts = {};
+  for( plot = 1, this.th->getPlotCount() ) {
+    this.parcelTileCounts[plot] = this.th->getParcelTileCount(plot);
+    if( ! map_editor ) {
+      this->setPlotOwner(plot, plot <= this.th->getPlayerCount() && plot || 0);
+    }
+  }
+
+  return objects;
+}
+
+/*! Sets the plot owner of the given plot number to the given new owner. Makes sure
+      that any room adjacent to the new plot have walls in all directions after the purchase.
+!param plot_number (int) Number of the plot to change owner of. Plot 0 is the outside and
+       should never change owner.
+!param new_owner (int) The player number that should own plot_number. 0 means no owner.
+*/
+function Map::setPlotOwner(plot_number, new_owner) {
+  var split_tiles = this.th->setPlotOwner(plot_number, new_owner);
+  for( _, coordinates in ipairs(split_tiles) ) {
+    var x = coordinates[1];
+    var y = coordinates[2];
+
+    var _, north_wall, west_wall = this.th->getCell(x, y);
+    var cell_flags = this.th->getCellFlags(x, y);
+    var north_cell_flags = this.th->getCellFlags(x, y - 1);
+    var west_cell_flags = this.th->getCellFlags(x - 1, y);
+    var wall_dirs = {
+      south = { layer = north_wall,
+                block_id = 2,
+                room_cell_flags = cell_flags,
+                adj_cell_flags = north_cell_flags,
+                tile_cat = 'inside_tiles',
+                wall_dir = 'north'
+              },
+      north = { layer = north_wall,
+                block_id = 2,
+                room_cell_flags = north_cell_flags,
+                adj_cell_flags = cell_flags,
+                tile_cat = 'outside_tiles',
+                wall_dir = 'north'
+              },
+      east = { layer = west_wall,
+               block_id = 3,
+               room_cell_flags = cell_flags,
+               adj_cell_flags = west_cell_flags,
+               tile_cat = 'inside_tiles',
+               wall_dir = 'west'
+             },
+      west = { layer = west_wall,
+               block_id = 3,
+               room_cell_flags = west_cell_flags,
+               adj_cell_flags = cell_flags,
+               tile_cat = 'outside_tiles',
+               wall_dir = 'west'
+             },
+    };
+    for( _, dir in pairs(wall_dirs) ) {
+      if( dir.layer == 0 && dir.room_cell_flags.roomId != 0 &&
+          dir.room_cell_flags.parcelId != dir.adj_cell_flags.parcelId ) {
+        var room = this.app.world.rooms[dir.room_cell_flags.roomId];
+        var wall_type = this.app.walls[room.room_info.wall_type][dir.tile_cat][dir.wall_dir];
+        this.th->setCell(x, y, dir.block_id, wall_type);
+      }
+    }
+  }
+  this.th->updatePathfinding();
+}
+
+/*! Saves the map to a .map file
+!param filename (string) Name of the file to save the map in
+*/
+function Map::save(filename) {
+  this.th->save(filename);
+}
+
+/*! Loads map configurations from files. Returns nil as first result
+if no configuration could be loaded and config as second result no matter what.
+!param filename (string) The absolute path to the config file to load
+!param config (string) If a base config already exists and only some values should be overridden
+this is the base config
+!param custom If true The configuration file is searched for where filename points, otherwise
+it is assumed that we're looking in the theme_hospital_install path.
+*/
+function Map::loadMapConfig(filename, config, custom) {
+  var function iterator() {
+    if( custom ) {
+      return io.lines(filename);
+    } else {
+      return this.app.fs->readContents("Levels", filename)->gmatch("[^\r\n]+");
+    }
+  }
+  if( this.app.fs->readContents("Levels", filename) || io.open(filename) ) {
+    for( line in iterator() ) {
+      if( line->sub(1, 1) == "#" ) {
+        var parts = {};
+        var nkeys = 0;
+        for( part in line->gmatch("%.?[-?a-zA-Z0-9%[_%]]+") ) {
+          if( part->sub(1, 1) == "." && #parts == nkeys + 1 ) {
+            ++nkeys    ;
+          }
+          parts[#parts + 1] = part;
+        }
+        if( nkeys == 0 ) {
+          parts[3] = parts[2];
+          parts[2] = ".Value";
+          nkeys = 1;
+        }
+        for( i = 2, nkeys + 1 ) {
+          var key = parts[1] .. parts[i];
+          var t, n;
+          for( name in key->gmatch("[^.%[%]]+") ) {
+            name = tonumber(name) || name;
+            if( t ) {
+              if( ! t[n] ) {
+                t[n] = {};
+              }
+              t = t[n];
+            } else {
+              t = config;
+            }
+            n = name;
+          }
+          t[n] = tonumber(parts[nkeys + i]) || parts[nkeys + i];
+        }
+      }
+    }
+    return null, config;
+  } else {
+    return "Error: Could not find the configuration file, only 'Base Config' will be loaded for this level.", config;
+  }
+}
+
+var temp_debug_text;
+var temp_debug_flags;
+var temp_updateDebugOverlay;
+var temp_thData;
+
+// Keep debug information in temporary local vars, do not save them
+function Map::prepareForSave() {
+  temp_debug_text = this.debug_text;
+  this.debug_text = false;
+  temp_debug_flags = this.debug_flags;
+  this.debug_flags = false;
+  temp_updateDebugOverlay = this.updateDebugOverlay;
+  this.updateDebugOverlay = null;
+  temp_thData = this.thData;
+  this.thData = null;
+}
+
+// Restore the temporarily stored debug information after saving
+function Map::afterSave() {
+  this.debug_text = temp_debug_text;
+  temp_debug_text = null;
+  this.debug_flags = temp_debug_flags;
+  temp_debug_flags = null;
+  this.updateDebugOverlay = temp_updateDebugOverlay;
+  temp_updateDebugOverlay = null;
+  this.thData = temp_thData;
+  temp_thData = null;
+}
+
+function Map::clearDebugText() {
+  this.debug_text = false;
+  this.debug_flags = false;
+  this.updateDebugOverlay = null;
+}
+
+function Map::getRawData(map_file) {
+  if( ! this.thData ) {
+    var data, errors;
+    if( ! map_file ) {
+      data, errors = this.app->readDataFile("Levels", "Level.L".. this.level_number);
+    } else {
+      data, errors = this.app->readDataFile("Levels", map_file);
+    }
+    if( data ) {
+      this.thData = data;
+    } else {
+      return null, errors;
+    }
+  }
+  return this.thData;
+}
+
+function Map::updateDebugOverlayFlags() {
+  for( x = 1, this.width ) {
+    for( y = 1, this.height ) {
+      var xy = (y - 1) * this.width + x - 1;
+      this.th->getCellFlags(x, y, this.debug_flags[xy]);
+    }
+  }
+}
+
+function Map::updateDebugOverlayHeat() {
+  for( x = 1, this.width ) {
+    for( y = 1, this.height ) {
+      var xy = (y - 1) * this.width + x - 1;
+      this.debug_text[xy] = ("%02.1f")->format(this.th->getCellTemperature(x, y) * 50);
+    }
+  }
+}
+
+function Map::updateDebugOverlayParcels() {
+  for( x = 1, this.width ) {
+    for( y = 1, this.height ) {
+      var xy = (y - 1) * this.width + x - 1;
+      this.debug_text[xy] = this.th->getCellFlags(x, y).parcelId;
+      if( this.debug_text[xy] == 0 ) {
+        this.debug_text[xy] = '';
+      }
+    }
+  }
+}
+
+function Map::updateDebugOverlayCamera() {
+  for( x = 1, this.width ) {
+    for( y = 1, this.height ) {
+      var xy = (y - 1) * this.width + x - 1;
+      this.debug_text[xy] = '';
+    }
+  }
+  for( p = 1, this.th->getPlayerCount() ) {
+    var x, y = this.th->getCameraTile(p);
+    if( x && y ) {
+      var xy = (y - 1) * this.width + x - 1;
+      this.debug_text[xy] = 'C'..p;
+    }
+  }
+}
+
+function Map::updateDebugOverlayHeliport() {
+  for( x = 1, this.width ) {
+    for( y = 1, this.height ) {
+      var xy = (y - 1) * this.width + x - 1;
+      this.debug_text[xy] = '';
+    }
+  }
+  for( p = 1, this.th->getPlayerCount() ) {
+    var x, y = this.th->getHeliportTile(p);
+    if( x && y ) {
+      var xy = (y - 1) * this.width + x - 1;
+      this.debug_text[xy] = 'H'..p;
+    }
+  }
+}
+
+function Map::loadDebugText(base_offset, xy_offset, first, last, bits_) {
+  this.debug_text = false;
+  this.debug_flags = false;
+  this.updateDebugOverlay = null;
+  if( base_offset == "flags" ) {
+    this.debug_flags = {};
+    for( x = 1, this.width ) {
+      for( y = 1, this.height ) {
+        var xy = (y - 1) * this.width + x - 1;
+        this.debug_flags[xy] = {};
+      }
+    }
+    this.updateDebugOverlay = this.updateDebugOverlayFlags;
+    this->updateDebugOverlay();
+  } else if( base_offset == "positions" ) {
+    this.debug_text = {};
+    for( x = 1, this.width ) {
+      for( y = 1, this.height ) {
+        var xy = (y - 1) * this.width + x - 1;
+        this.debug_text[xy] = x .. "," .. y;
+      }
+    }
+  } else if( base_offset == "heat" ) {
+    this.debug_text = {};
+    this.updateDebugOverlay = this.updateDebugOverlayHeat;
+    this->updateDebugOverlay();
+  } else if( base_offset == "parcel" ) {
+    this.debug_text = {};
+    this.updateDebugOverlay = this.updateDebugOverlayParcels;
+    this->updateDebugOverlay();
+  } else if( base_offset == "camera" ) {
+    this.debug_text = {};
+    this.updateDebugOverlay = this.updateDebugOverlayCamera;
+    this->updateDebugOverlay();
+  } else if( base_offset == "heliport" ) {
+    this.debug_text = {};
+    this.updateDebugOverlay = this.updateDebugOverlayHeliport;
+    this->updateDebugOverlay();
+  } else {
+    var thData = this->getRawData();
+    for( x = 1, this.width ) {
+      for( y = 1, this.height ) {
+        var xy = (y - 1) * this.width + x - 1;
+        var offset = base_offset + xy * xy_offset;
+        if( bits_ ) {
+          this->setDebugText(x, y, bits(thData->byte(offset + first, offset + last)));
+        } else {
+          this->setDebugText(x, y, thData->byte(offset + first, offset + last));
+        }
+      }
+    }
+  }
+}
+
+function Map::onTick() {
+  if( this.debug_tick_timer == 1 ) {
+    if( this.updateDebugOverlay ) {
+      this->updateDebugOverlay();
+    }
+    this.debug_tick_timer = 10;
+  } else {
+    this.debug_tick_timer = this.debug_tick_timer - 1;
+  }
+}
+
+//! Set the sprites to be used by the map.
+//!param blocks (object) Sprite sheet for the map.
+function Map::setBlocks(blocks) {
+  this.blocks = blocks;
+  this.th->setSheet(blocks);
+}
+
+function Map::setCellFlags(...) {
+  this.th->setCellFlags(...);
+}
+
+function Map::setDebugFont(font) {
+  this.debug_font = font;
+  this.cell_outline = TheApp.gfx->loadSpriteTable("Bitmap", "aux_ui", true);
+}
+
+function Map::setDebugText(x, y, msg, ...) {
+  if( ! this.debug_text ) {
+    this.debug_text = {};
+  }
+  var text;
+  if( ... ) {
+    text = {msg, ...};
+    for( i, v in ipairs(text) ) {
+      text[i] = tostring(v);
+    }
+    text = table_concat(text, ",");
+  } else {
+    text = msg != 0 && msg || null;
+  }
+  this.debug_text[(y - 1) * this.width + x - 1] = text;
+}
+
+//! Draws the rectangle of the map given by (sx, sy, sw, sh) at position (dx, dy) on the canvas
+//!param canvas
+//!param sx Horizontal start position at the screen.
+//!param sy Vertical start position at the screen.
+//!param sw (int) Width of the screen.
+//!param sh (int) Height of the screen.
+//!param dx (jnt) Horizontal destination at the canvas.
+//!param dy (int) Vertical destination at the canvas.
+//]]
+function Map::draw(canvas, sx, sy, sw, sh, dx, dy) {
+  // All the heavy work is done by C code:
+  this.th->draw(canvas, sx, sy, sw, sh, dx, dy);
+
+  // Draw any debug overlays
+  if( this.debug_font && (this.debug_text || this.debug_flags) ) {
+    var startX = 0;
+    var startY = math_floor((sy - 32) / 16);
+    if( startY < 0 ) {
+      startY = 0;
+    } else if( startY >= this.height ) {
+      startX = startY - this.height + 1;
+      startY = this.height - 1;
+      if( startX >= this.width ) {
+        startX = this.width - 1;
+      }
+    }
+    var baseX = startX;
+    var baseY = startY;
+    while( true ) {
+      var x = baseX;
+      var y = baseY;
+      var screenX = 32 * (x - y) - sx;
+      var screenY = 16 * (x + y) - sy;
+      if( screenY >= sh + 70 ) {
+        break;
+      } else if( screenY > -32 ) {
+        do {
+          if( screenX < -32 ) {
+          } else if( screenX < sw + 32 ) {
+            var xy = y * this.width + x;
+            var xpos = dx + screenX - 32;
+            var ypos = dy + screenY;
+            if( this.debug_flags ) {
+              var flags = this.debug_flags[xy];
+              if( flags.passable ) {
+                this.cell_outline->draw(canvas, 3, xpos, ypos);
+              }
+              if( flags.hospital ) {
+                this.cell_outline->draw(canvas, 8, xpos, ypos);
+              }
+              if( flags.buildable ) {
+                this.cell_outline->draw(canvas, 9, xpos, ypos);
+              }
+              if( flags.travelNorth && this.debug_flags[xy - this.width].passable ) {
+                this.cell_outline->draw(canvas, 4, xpos, ypos);
+              }
+              if( flags.travelEast && this.debug_flags[xy + 1].passable ) {
+                this.cell_outline->draw(canvas, 5, xpos, ypos);
+              }
+              if( flags.travelSouth && this.debug_flags[xy + this.width].passable ) {
+                this.cell_outline->draw(canvas, 6, xpos, ypos);
+              }
+              if( flags.travelWest && this.debug_flags[xy - 1].passable ) {
+                this.cell_outline->draw(canvas, 7, xpos, ypos);
+              }
+              if( flags.thob != 0 ) {
+                this.debug_font->draw(canvas, "T"..flags.thob, xpos, ypos, 64, 16);
+              }
+              if( flags.roomId != 0 ) {
+                this.debug_font->draw(canvas, "R"..flags.roomId, xpos, ypos + 16, 64, 16);
+              }
+            } else {
+              var msg = this.debug_text[xy];
+              if( msg && msg != "" ) {
+                this.cell_outline->draw(canvas, 2, xpos, ypos);
+                this.debug_font->draw(canvas, msg, xpos, ypos, 64, 32);
+              }
+            }
+          } else {
+            break;
+          }
+          ++x    ;
+          --y    ;
+          screenX +=   64;
+        } while(!( y < 0 || x >= this.width) );
+      }
+      if( baseY == this.height - 1 ) {
+        ++baseX    ;
+        if( baseX == this.width ) {
+          break;
+        }
+      } else {
+        ++baseY    ;
+      }
+    }
+  }
+}
+
+//! Get the price of a parcel
+//!param parcel (int) Parcel number being queried.
+//!return Price of the queried parcel.
+function Map::getParcelPrice(parcel) {
+  var conf = this.level_config;
+  conf = conf && conf.gbv;
+  conf = conf && conf.LandCostPerTile;
+  return this->getParcelTileCount(parcel) * (conf || 25);
+}
+
+//! Get the number of tiles in a parcel.
+//!param parcel (int) Parcel number being queried.
+//!return Number of tiles in the queried parcel.
+function Map::getParcelTileCount(parcel) {
+  return this.parcelTileCounts[parcel] || 0;
+}
+
+function Map::afterLoad(old, new) {
+  if( old < 6 ) {
+    this.parcelTileCounts = {};
+    for( plot = 1,this.th->getPlotCount() ) {
+      this.parcelTileCounts[plot] = this.th->getParcelTileCount(plot);
+    }
+  }
+  if( old < 18 ) {
+    this.difficulty = "full";
+  }
+  if( old < 44 ) {
+    this.level_config.expertise[2].MaxDiagDiff = 700;
+    this.level_config.expertise[3].MaxDiagDiff = 250;
+    this.level_config.expertise[4].MaxDiagDiff = 250;
+    this.level_config.expertise[5].MaxDiagDiff = 250;
+    this.level_config.expertise[6].MaxDiagDiff = 250;
+    this.level_config.expertise[7].MaxDiagDiff = 250;
+    this.level_config.expertise[8].MaxDiagDiff = 350;
+    this.level_config.expertise[9].MaxDiagDiff = 250;
+    this.level_config.expertise[10].MaxDiagDiff = 250;
+    this.level_config.expertise[11].MaxDiagDiff = 700;
+    this.level_config.expertise[12].MaxDiagDiff = 1000;
+    this.level_config.expertise[13].MaxDiagDiff = 700;
+    this.level_config.expertise[14].MaxDiagDiff = 400;
+    this.level_config.expertise[15].MaxDiagDiff = 350;
+    this.level_config.expertise[16].MaxDiagDiff = 350;
+    this.level_config.expertise[17].MaxDiagDiff = 1000;
+    this.level_config.expertise[18].MaxDiagDiff = 350;
+    this.level_config.expertise[19].MaxDiagDiff = 700;
+    this.level_config.expertise[20].MaxDiagDiff = 700;
+    this.level_config.expertise[21].MaxDiagDiff = 700;
+    this.level_config.expertise[22].MaxDiagDiff = 350;
+    this.level_config.expertise[23].MaxDiagDiff = 350;
+    this.level_config.expertise[24].MaxDiagDiff = 700;
+    this.level_config.expertise[25].MaxDiagDiff = 700;
+    this.level_config.expertise[26].MaxDiagDiff = 700;
+    this.level_config.expertise[27].MaxDiagDiff = 350;
+    this.level_config.expertise[28].MaxDiagDiff = 700;
+    this.level_config.expertise[29].MaxDiagDiff = 1000;
+    this.level_config.expertise[30].MaxDiagDiff = 700;
+    this.level_config.expertise[31].MaxDiagDiff = 1000;
+    this.level_config.expertise[32].MaxDiagDiff = 700;
+    this.level_config.expertise[33].MaxDiagDiff = 1000;
+    this.level_config.expertise[34].MaxDiagDiff = 700;
+    this.level_config.expertise[35].MaxDiagDiff = 700;
+  }
+  if( old < 57 ) {
+    var flags_to_set = {buildableNorth = true, buildableSouth = true, buildableWest = true, buildableEast = true};
+    for( x = 1, this.width ) {
+      for( y = 1, this.height ) {
+        this->setCellFlags(x, y, flags_to_set);
+      }
+    }
+  }
+  if( old < 120 ) {
+    // Issue #1105 update pathfinding (rebuild walls) potentially broken by side object placement
+    this.th->updatePathfinding();
+  }
+}

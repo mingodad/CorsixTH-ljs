@@ -1,0 +1,215 @@
+/* Copyright (c) 2013 Mark (Mark L) Lawlor
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Customise window used in the main menu and ingame.
+class ("UICustomise") (UIResizable);
+
+//-@type UICustomise
+var UICustomise = _G["UICustomise"];
+
+var col_bg = {
+  red = 154,
+  green = 146,
+  blue = 198,
+};
+
+var col_shadow = {
+  red = 134,
+  green = 126,
+  blue = 178,
+};
+
+var col_caption = {
+  red = 174,
+  green = 166,
+  blue = 218,
+};
+
+function UICustomise::UICustomise(ui, mode) {
+  this->UIResizable(ui, 320, 280, col_bg);
+
+  var app = ui.app;
+  this.mode = mode;
+  this.modal_class = mode == "menu" && "main menu" || "options" || "customise";
+  this.on_top = mode == "menu";
+  this.esc_closes = true;
+  this.resizable = false;
+  this->setDefaultPosition(0.5, 0.25);
+  this.default_button_sound = "selectx.wav";
+  this.app = app;
+
+  // Window parts definition
+  // Title
+  this->addBevelPanel(80, 10, 160, 20, col_caption)->setLabel(_S.customise_window.caption)
+    .lowered = true;
+
+  // Movies, global switch
+  this->addBevelPanel(20, 40, 135, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.customise_window.movies)->setTooltip(_S.tooltip.customise_window.movies).lowered = true;
+  this.movies_panel =
+    this->addBevelPanel(160, 40, 135, 20, col_bg)->setLabel(app.config.movies && _S.customise_window.option_on || _S.customise_window.option_off);
+  this.movies_button = this.movies_panel->makeToggleButton(0, 0, 140, 20, null, this.buttonMoviesGlobal)
+    ->setToggleState(app.config.movies)->setTooltip(_S.tooltip.customise_window.movies);
+
+  // Intro movie
+  this->addBevelPanel(20, 65, 135, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.customise_window.intro)->setTooltip(_S.tooltip.customise_window.intro).lowered = true;
+  this.intro_panel =
+    this->addBevelPanel(160, 65, 135, 20, col_bg)->setLabel(app.config.play_intro && _S.customise_window.option_on || _S.customise_window.option_off);
+  this.intro_button = this.intro_panel->makeToggleButton(0, 0, 140, 20, null, this.buttonIntro)
+    ->setToggleState(app.config.play_intro)->setTooltip(_S.tooltip.customise_window.intro);
+
+  // Allow user actions when paused
+  this->addBevelPanel(20, 90, 135, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.customise_window.paused)->setTooltip(_S.tooltip.customise_window.paused).lowered = true;
+  this.paused_panel =
+    this->addBevelPanel(160, 90, 135, 20, col_bg)->setLabel(app.config.allow_user_actions_while_paused && _S.customise_window.option_on || _S.customise_window.option_off);
+  this.paused_button = this.paused_panel->makeToggleButton(0, 0, 140, 20, null, this.buttonPaused)
+    ->setToggleState(app.config.allow_user_actions_while_paused)->setTooltip(_S.tooltip.customise_window.paused);
+
+  // Volume down is opening casebook
+  this->addBevelPanel(20, 115, 135, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.customise_window.volume)->setTooltip(_S.tooltip.customise_window.volume).lowered = true;
+  this.volume_panel =
+    this->addBevelPanel(160, 115, 135, 20, col_bg)->setLabel(app.config.volume_opens_casebook && _S.customise_window.option_on || _S.customise_window.option_off);
+  this.volume_button = this.volume_panel->makeToggleButton(0, 0, 140, 20, null, this.buttonVolume)
+    ->setToggleState(app.config.volume_opens_casebook)->setTooltip(_S.tooltip.customise_window.volume);
+
+  // Alien DNA from emergencies only/must stand/can knock on doors
+  this->addBevelPanel(20, 140, 135, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.customise_window.aliens)->setTooltip(_S.tooltip.customise_window.aliens).lowered = true;
+  this.aliens_panel =
+    this->addBevelPanel(160, 140, 135, 20, col_bg)->setLabel(app.config.alien_dna_only_by_emergency && _S.customise_window.option_on || _S.customise_window.option_off);
+  this.aliens_button = this.aliens_panel->makeToggleButton(0, 0, 140, 20, null, this.buttonAliens)
+    ->setToggleState(app.config.alien_dna_only_by_emergency)->setTooltip(_S.tooltip.customise_window.aliens);
+
+  // Allow female patients with Fractured Bones
+  this->addBevelPanel(20, 165, 135, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.customise_window.fractured_bones)->setTooltip(_S.tooltip.customise_window.fractured_bones).lowered = true;
+  this.fractured_bones_panel =
+    this->addBevelPanel(160, 165, 135, 20, col_bg)->setLabel(app.config.disable_fractured_bones_females && _S.customise_window.option_on || _S.customise_window.option_off);
+  this.fractured_bones_button = this.fractured_bones_panel->makeToggleButton(0, 0, 140, 20, null, this.buttonFractured_bones)
+    ->setToggleState(app.config.disable_fractured_bones_females)->setTooltip(_S.tooltip.customise_window.fractured_bones);
+
+  // Allow average contents when building rooms
+  this->addBevelPanel(20, 190, 135, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.customise_window.average_contents)->setTooltip(_S.tooltip.customise_window.average_contents).lowered = true;
+  this.average_contents_panel =
+    this->addBevelPanel(160, 190, 135, 20, col_bg)->setLabel(app.config.enable_avg_contents && _S.customise_window.option_on || _S.customise_window.option_off);
+  this.average_contents_button = this.average_contents_panel->makeToggleButton(0, 0, 140, 20, null, this.buttonAverage_contents)
+    ->setToggleState(app.config.enable_avg_contents)->setTooltip(_S.tooltip.customise_window.average_contents);
+
+  // "Back" button
+  this->addBevelPanel(20, 220, 280, 40, col_bg)->setLabel(_S.customise_window.back)
+    ->makeButton(0, 0, 280, 40, null, this.buttonBack)->setTooltip(_S.tooltip.customise_window.back);
+}
+
+function UICustomise::buttonAudioGlobal(checked) {
+  var window = UIAudio(this.ui, "menu");
+  this.ui->addWindow(window);
+}
+
+function UICustomise::buttonMoviesGlobal(checked) {
+  var app = this.ui.app;
+  app.config.movies = ! app.config.movies;
+  this.movies_button->toggle();
+  this.movies_panel->setLabel(app.config.movies && _S.customise_window.option_on || _S.customise_window.option_off);
+  this->reload();
+  app->saveConfig();
+}
+
+function UICustomise::buttonIntro(checked) {
+  var app = this.ui.app;
+  app.config.play_intro = ! app.config.play_intro;
+  this.intro_button->toggle();
+  this.intro_panel->setLabel(app.config.play_intro && _S.customise_window.option_on || _S.customise_window.option_off);
+  this->reload();
+  app->saveConfig();
+}
+
+function UICustomise::buttonPaused(checked) {
+  var app = this.ui.app;
+  app.config.allow_user_actions_while_paused = ! app.config.allow_user_actions_while_paused;
+  this.paused_button->toggle();
+  this.paused_panel->setLabel(app.config.allow_user_actions_while_paused && _S.customise_window.option_on || _S.customise_window.option_off);
+  this->reload();
+  app->saveConfig();
+}
+
+function UICustomise::buttonVolume(checked) {
+  var app = this.ui.app;
+  app.config.volume_opens_casebook = ! app.config.volume_opens_casebook;
+  this.volume_button->toggle();
+  this.volume_panel->setLabel(app.config.volume_opens_casebook && _S.customise_window.option_on || _S.customise_window.option_off);
+  this->reload();
+  app->saveConfig();
+}
+
+function UICustomise::buttonAliens(checked) {
+  var app = this.ui.app;
+  app.config.alien_dna_only_by_emergency = ! app.config.alien_dna_only_by_emergency;
+  app.config.alien_dna_must_stand = ! app.config.alien_dna_must_stand;
+  app.config.alien_dna_can_knock_on_doors = ! app.config.alien_dna_can_knock_on_doors;
+  this.aliens_button->toggle();
+  this.aliens_panel->setLabel(app.config.alien_dna_only_by_emergency && _S.customise_window.option_on || _S.customise_window.option_off);
+  app->saveConfig();
+  this->reload();
+  var err = {_S.errors.alien_dna};
+  this.ui->addWindow(UIInformation(this.ui, err));
+}
+
+function UICustomise::buttonFractured_bones(checked) {
+  var app = this.ui.app;
+  app.config.disable_fractured_bones_females = ! app.config.disable_fractured_bones_females;
+  this.fractured_bones_button->toggle();
+  this.fractured_bones_panel->setLabel(app.config.disable_fractured_bones_females && _S.customise_window.option_on || _S.customise_window.option_off);
+  app->saveConfig();
+  this->reload();
+  var err = {_S.errors.fractured_bones};
+  this.ui->addWindow(UIInformation(this.ui, err));
+}
+
+function UICustomise::buttonAverage_contents(checked) {
+  var app = this.ui.app;
+  app.config.enable_avg_contents = ! app.config.enable_avg_contents;
+  this.average_contents_button->toggle();
+  this.average_contents_panel->setLabel(app.config.enable_avg_contents && _S.customise_window.option_on || _S.customise_window.option_off);
+  app->saveConfig();
+  this->reload();
+}
+
+function UICustomise::buttonBack() {
+  this->close();
+  var window = UIOptions(this.ui, "menu");
+  this.ui->addWindow(window);
+}
+
+// So that we can see the option has been changed reload the menu
+function UICustomise::reload() {
+  var window = UICustomise(this.ui, "menu");
+  this.ui->addWindow(window);
+}
+
+function UICustomise::close() {
+  UIResizable.close(this);
+  if( this.mode == "menu" ) {
+    this.ui->addWindow(UIMainMenu(this.ui));
+  }
+}

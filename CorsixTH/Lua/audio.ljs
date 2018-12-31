@@ -1,0 +1,674 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var pathsep = package.config->sub(1, 1);
+var rnc = require("rnc");
+var lfs = require("lfs");
+var SDL = require("sdl");
+var TH = require("TH");
+var ipairs
+    = ipairs;
+
+//! Layer which handles the Lua-facing side of loading and playing audio.
+class ("Audio");
+
+//-@type Audio
+var Audio = _G["Audio"];
+
+function Audio::Audio(app) {
+  this.app = app;
+
+  this.has_bg_music = false;
+  this.not_loaded = ! app.config.audio;
+  this.unused_played_callback_id = 0;
+  this.played_sound_callbacks = {};
+  this.entities_waiting_for_sound_to_be_enabled = {};
+}
+
+function Audio::clearCallbacks() {
+  this.unused_played_callback_id = 0;
+  this.played_sound_callbacks = {};
+  this.entities_waiting_for_sound_to_be_enabled = {};
+}
+
+var function GetFileData(path) {
+  var f, e = io.open(path, "rb");
+  if( ! f ) {
+    return f, e;
+  }
+  e = f->read("*a");
+  f->close();
+  return e;
+}
+
+function Audio::init() {
+  this.background_playlist = {
+    // {title = "", filename = "", enabled = true, music = nil},
+  };
+  if( this.not_loaded ) {
+    return;
+  }
+  if( ! SDL.audio.loaded ) {
+    print("Notice: Audio system not loaded as CorsixTH compiled without it");
+    this.not_loaded = true;
+    return;
+  }
+  var mp3 = this.app.config.audio_mp3;
+  var music_dir;
+  if( mp3 ) {
+    music_dir = mp3;
+    if( music_dir->sub(-1) != pathsep ) {
+      music_dir = music_dir .. pathsep;
+    }
+  }
+
+  var music_array = {};
+  var function musicFileTable(filename) {
+    filename = filename->upper();
+    var t = music_array[filename];
+    if( t == null ) {
+      t = {};
+      music_array[filename] = t;
+    }
+    return t;
+  }
+
+  /*
+    Find the music files on disk.
+    -----------------------------
+
+    - Will search through all the files in music_dir.
+    - Adds xmi and mp3 files.
+    - If ATLANTIS.XMI and ATLANTIS.MP3 exists, the MP3 is preferred.
+    - Uses titles from MIDI.TXT if found, else the filename.
+  --*/
+  var midi_txt; // File name of midi.txt file, if any.
+
+  var _f, _s, _v;
+  if( music_dir ) {
+    _f, _s, _v = lfs.dir(music_dir);
+  } else {
+    _f, _s, _v = pairs(this.app.fs->listFiles("Sound", "Midi") || {});
+  }
+  for( file in _f, _s, _v ) {
+    var filename, ext = file->match("^(.*)%.([^.]+)$");
+    ext = ext && ext->upper();
+    // Music file found (mp3/xmi).
+    if( ext == "MP3" || ext == "XMI" ) {
+      var info = musicFileTable(filename);
+      info.title = filename;
+      if( ext == "MP3" ) {
+        if( music_dir ) {
+          info.filename_mp3 = music_dir .. file;
+        } else {
+          print("Warning: CorsixTH only supports xmi if audio_mp3" ..
+              " is not defined in the config file.");
+            music_array[filename->upper()] = null;
+        }
+         // Remove the xmi version of this file, if found.
+         info.filename = null;
+      } else if( ext == "XMI" && ! info.filename_mp3 ) {
+        // NB: If the mp3 version exists, this file is ignored
+        info.filename = table.concat({"Sound", "Midi", file}, pathsep);
+      }
+      // This title might be replaced later by the midi_txt.
+    } else if( ext == "TXT" && (file->sub(1, 4)->upper() == "MIDI" ||
+                             file->sub(1, 5)->upper() == "NAMES") ) {
+      // If it Looks like the midi.txt or equiv, then remember it for later.
+      midi_txt = file;
+    }
+  }
+
+  // Enable music files and add them to the playlist.
+  for( _, info in pairs(music_array) ) {
+    info.enabled = true;
+    this.background_playlist[#this.background_playlist + 1] = info;
+  }
+
+  // This is later. If we found a midi.txt, go through it and add the titles to the files we know
+  if( midi_txt ) {
+    var data;
+    if( music_dir ) {
+      data = assert(GetFileData(music_dir .. midi_txt));
+    } else {
+      data = assert(this.app.fs->readContents("Sound", "Midi", midi_txt));
+    }
+    for( file, title in data->gmatch("([^\r\n\26]+).-([^\r\n\26]+)") ) {
+      var info = musicFileTable(file->match("^(.*)%.") || file);
+      if( next(info) != null ) {
+        info.title = title;
+      } else {
+        print('Notice: Background track "'.. file ..'" named in list file, '..
+              'but it does not exist.');
+      }
+    }
+  }
+  if( #this.background_playlist == 0 && this.app.good_install_folder ) {
+    print("Notice: Audio system loaded, but found no background tracks");
+    this.has_bg_music = false;
+  } else {
+    this.has_bg_music = true;
+  }
+
+  var status, err = SDL.audio.init(this.app.config.audio_frequency,
+    this.app.config.audio_channels, this.app.config.audio_buffer_size);
+  if( status ) {
+    // NB: Playback will not start if play_music is set to false
+    this->playRandomBackgroundTrack();
+  } else {
+    print("Notice: Audio system could not initialise (SDL error: " .. tostring(err) .. ")");
+    this.not_loaded = true;
+    this.has_bg_music = false;
+    this.background_playlist = {};
+    return;
+  }
+}
+
+function Audio::initSpeech(speech_file) {
+  this.sound_archive = null;
+  this.sound_fx = null;
+  if( this.not_loaded ) {
+    return;
+  }
+
+  var function load_sound_file(file) {
+    return this.app.fs->readContents("Sound", "Data", file);
+  }
+
+  speech_file = speech_file || "Sound-0.dat";
+  if( this.speech_file_name == speech_file ) {
+    return;
+  }
+  var archive_data, err = load_sound_file(speech_file);
+
+  // If sound file not found and language chosen is not English,
+  // maybe we can have more chance loading English sounds
+  if( ! archive_data && speech_file != "Sound-0.dat" && this.app.good_install_folder ) {
+    if( this.speech_file_name == "Sound-0.dat" ) {
+      return;
+    }
+    print("Notice: Attempt to load English sounds as no SOUND/DATA/" .. speech_file .. " file found");
+    speech_file = "Sound-0.dat";
+    archive_data = load_sound_file(speech_file);
+  }
+
+  if( ! archive_data ) {
+    if( this.app.good_install_folder ) {
+      print("Notice: No sound effects as no SOUND/DATA/".. speech_file ..
+          " file could be found / opened.");
+      print("The reported error was: ".. err);
+    }
+  } else {
+    if( archive_data->sub(1, 3) == "RNC" ) {
+      archive_data = assert(rnc.decompress(archive_data));
+    }
+    this.sound_archive = TH.soundArchive();
+    if( ! this.sound_archive->load(archive_data) ) {
+      print("Notice: No sound effects as SOUND/DATA/" .. speech_file .. " could not be loaded");
+      if( #this.background_playlist == 0 ) {
+        this.not_loaded = true;
+      }
+    } else {
+      this.speech_file_name = speech_file;
+      this.sound_fx = TH.soundEffects();
+      this.sound_fx->setSoundArchive(this.sound_archive);
+      var w, h = this.app.config.width / 2, this.app.config.height / 2;
+      this.sound_fx->setCamera(math.floor(w), math.floor(h), math.floor((w**2 + h**2)**0.5));
+      //self:dumpSoundArchive[[E:\CPP\2K8\CorsixTH\DataRaw\Sound\]]
+    }
+  }
+}
+
+function Audio::dumpSoundArchive(out_dir) {
+  var info,warning = io.open(out_dir .. "info.csv", "w");
+
+  if( info == null ) {
+    print("Error: Audio dump failed because info.csv couldn't be created and/or opened in the dump directory:" .. out_dir);
+    print(warning);
+    return;
+  }
+
+  for( i = 1, #this.sound_archive - 1 ) {
+    var filename = this.sound_archive->getFilename(i);
+    info->write(i, ",", filename, ",", this.sound_archive->getDuration(i), ",\n");
+    var file = io.open(out_dir .. i .. "_" .. filename, "wb");
+    file->write(this.sound_archive->getFileData(i));
+    file->close();
+    print("".. i .. "/" .. #this.sound_archive - 1);
+  }
+  info->close();
+  print("Sounds dumped to: " .. out_dir);
+}
+
+var wilcard_cache = permanent ("audio_wildcard_cache") ({});
+
+function Audio::playSound(name, where, is_announcement, played_callback, played_callback_delay) {
+  var sound_fx = this.sound_fx;
+  if( sound_fx ) {
+    if( name->find("*") ) {
+      // Resolve wildcard to one particular sound
+      var list = this->cacheSoundFilenamesAssociatedWithName(name);
+      name = list[1] && list[math.random(1, #list)] || name;
+    }
+    var _, warning;
+    var volume = is_announcement && this.app.config.announcement_volume || this.app.config.sound_volume;
+    var x, y;
+    var played_callbacks_id;
+    if( played_callback ) {
+      played_callbacks_id = this.unused_played_callback_id;
+      this.unused_played_callback_id = this.unused_played_callback_id + 1;
+      this.played_sound_callbacks[tostring(played_callbacks_id)] = played_callback;
+    }
+    if( where ) {
+      x, y = Map->WorldToScreen(where.tile_x, where.tile_y);
+      var dx, dy = where.th->getPosition();
+      var ui = this.app.ui;
+      x = x + dx - ui.screen_offset_x;
+      y = y + dy - ui.screen_offset_y;
+    }
+    _, warning = sound_fx->play(name, volume, x, y, played_callbacks_id, played_callback_delay);
+
+    if( warning ) {
+      // Indicates something happened
+      this.app.world->gameLog("Audio:playSound - Warning: " .. warning);
+    }
+  }
+}
+
+function Audio::cacheSoundFilenamesAssociatedWithName(name) {
+  var list = wilcard_cache[name];
+  if( ! list ) {
+    var filename;
+    list = {};
+    wilcard_cache[name] = list;
+    var pattern = ("^" .. name->gsub("%*",".*") .. "$")->upper();
+    for( i = 1, #this.sound_archive - 1 ) {
+      filename = this.sound_archive->getFilename(i)->upper();
+      if( filename->find(pattern) ) {
+        list[#list + 1] = filename;
+      }
+    }
+  }
+  return list;
+}
+
+/*
+This function's integer array parameters for the min and max silence lengths should provide lengths
+for this game's different speeds, indexed as follows:
+[1] Slowest [2] Slow [3] Normal [4] Fast [5] Maximum
+
+!param min_silence_lengths (integer array) The desired minimum silence lengths for this game's different speeds.
+!param max_silence_lengths (integer array) The desired maximum silence lengths for this game's different speeds.
+!param num_silences (integer) How many silence lengths should be in the returned table of generated lengths.
+!return (table) A table of randomly ordered integers for the generated silence lengths.
+--*/
+var function getSilenceLengths(min_silence_lengths, max_silence_lengths, num_silences) {
+  var min_silence = min_silence_lengths[TheApp.world.tick_rate];
+  var max_silence = max_silence_lengths[TheApp.world.tick_rate];
+
+  var silences = {};
+  if( min_silence == max_silence ) {
+    silences[1] = min_silence;
+  } else {
+    for( i = 1, num_silences ) {
+      silences[i] = math.random(min_silence, max_silence);
+    }
+  }
+
+  return silences;
+}
+
+/*
+Plays related sounds at an entity in a random sequence, with random length silences between the sounds.
+
+This function's integer array parameters for the min and max silence lengths should provide lengths
+for this game's different speeds, indexed as follows:
+[1] Slowest [2] Slow [3] Normal [4] Fast [5] Maximum Speed
+
+!param names (string) A name pattern for the sequence of related sounds to be played for example: LAVA00*.wav
+!param entity : Where the sounds will be played at, the player won't hear the sounds being played at the entity
+when it isn't in their view.
+!param min_silence_lengths (integer array) The desired minimum silence lengths for this game's different speeds.
+!param max_silence_lengths (integer array) The desired maximum silence lengths for this game's different speeds.
+!param num_silences (integer) How many different silence lengths should be used, this can be a nil parameter.
+--*/
+function Audio::playEntitySounds(names, entity, min_silence_lengths, max_silence_lengths, num_silences) {
+  if( this.sound_fx ) {
+    this->cacheSoundFilenamesAssociatedWithName(names);
+    var silences = getSilenceLengths(min_silence_lengths, max_silence_lengths, num_silences);
+    this->entitySoundsHandler(wilcard_cache[names], entity, silences, 1);
+  }
+}
+
+var function canSoundsBePlayed() {
+  return TheApp.config.play_sounds && ! TheApp.world->isPaused();
+}
+
+/*
+Called by the above function.
+
+This function's integer array parameters for the min and max silence lengths should provide lengths
+for this game's different speeds, indexed as follows:
+[1] Slowest [2] Slow [3] Normal [4] Fast [5] Maximum Speed
+
+!param sounds (string) A name pattern for the sequence of related sounds to be played for example: LAVA00*.wav
+!param entity : Where the sounds will be played at, the player won't hear the sounds being played at the entity
+when it isn't in their view.
+!param silences (integer array) the different pause durations to be used between the played sounds.
+!param silences_pointer (integer) the index for the pause duration which should be used after this call's sound has been played.
+--*/
+function Audio::entitySoundsHandler(sounds, entity, silences, silences_pointer) {
+  if( entity.playing_sounds_in_random_sequence ) {
+    var sound_played_callback = function() {
+      this->entitySoundsHandler(sounds, entity, silences, silences_pointer);
+    };
+
+    if( canSoundsBePlayed() ) {
+      var x, y = Map->WorldToScreen(entity.tile_x, entity.tile_y);
+      var dx, dy = entity.th->getPosition();
+      x = x + dx - this.app.ui.screen_offset_x;
+      y = y + dy - this.app.ui.screen_offset_y;
+
+      this.played_sound_callbacks[tostring(this.unused_played_callback_id)] = sound_played_callback;
+      this.sound_fx->play(sounds[math.random(1,#sounds)], this.app.config.sound_volume,
+          x, y, this.unused_played_callback_id, silences_pointer);
+
+      this.unused_played_callback_id = this.unused_played_callback_id + 1;
+      if( #silences > 1 ) {
+        silences_pointer = (silences_pointer % #silences) + 1;
+      }
+    //If the sound can't be played now:
+    } else {
+      this.entities_waiting_for_sound_to_be_enabled[entity] = sound_played_callback;
+      entity->setWaitingForSoundEffectsToBeTurnedOn(true);
+    }
+  } else {
+    if( this.entities_waiting_for_sound_to_be_enabled[entity] ) {
+      this.entities_waiting_for_sound_to_be_enabled[entity] = null;
+    }
+  }
+}
+
+function Audio::onEndPause() {
+  if( TheApp.config.play_sounds ) {
+    this->tellInterestedEntitiesTheyCanNowPlaySounds();
+  }
+}
+
+function Audio::onSoundPlayed(played_callbacks_id) {
+  if( TheApp.world != null ) {
+    if( this.played_sound_callbacks[tostring(played_callbacks_id)] ) {
+      this.played_sound_callbacks[tostring(played_callbacks_id)]();
+      this.played_sound_callbacks[tostring(played_callbacks_id)] = null;
+    }
+  }
+}
+
+//! Returns whether the given sound (either a string or a number)
+//! exists in the sound archive
+//!param sound The sound to look for, either a string (name) or a
+// number (position in the list of sounds)
+function Audio::soundExists(sound) {
+  if( this.sound_archive ) {
+    return this.sound_archive->soundExists(sound);
+  } else {
+    return false;
+  }
+}
+
+function Audio::playRandomBackgroundTrack() {
+  if( this.not_loaded || #this.background_playlist == 0 ) {
+    return;
+  }
+  var enabled = {};
+  for( i, info in ipairs(this.background_playlist) ) {
+    if( info.enabled ) {
+      enabled[#enabled + 1] = i;
+    }
+  }
+  if( ! enabled[1] ) {
+    return;
+  }
+  var index = enabled[math.random(1, #enabled)];
+  this->playBackgroundTrack(index);
+}
+
+function Audio::findIndexOfCurrentTrack() {
+  for( i, info in ipairs(this.background_playlist) ) {
+    if( info.music == this.background_music ) {
+      return i;
+    }
+  }
+
+  return 1;
+}
+
+function Audio::playNextOrPreviousBackgroundTrack(direction) {
+  if( this.not_loaded || #this.background_playlist == 0 ) {
+    return;
+  }
+
+  if( ! this.background_music ) {
+    this->playRandomBackgroundTrack();
+    return;
+  }
+
+  var index = this->findIndexOfCurrentTrack();
+
+  // Find next/previous track
+  for( i = 1, #this.background_playlist ) {
+    i = ((index + direction * i - 1) % #this.background_playlist) + 1;
+    if( this.background_playlist[i].enabled ) {
+      this->playBackgroundTrack(i);
+      return;
+    }
+  }
+}
+
+function Audio::playNextBackgroundTrack() {
+  this->playNextOrPreviousBackgroundTrack(1);
+}
+
+function Audio::playPreviousBackgroundTrack() {
+  this->playNextOrPreviousBackgroundTrack(-1);
+}
+
+//! Pauses or unpauses background music depending on the current state.
+//! Returns whether music is currently paused or not after the call.
+//! If nil is returned music might either be playing or completely stopped.
+function Audio::pauseBackgroundTrack() {
+  assert(this.background_music, "Trying to pause music while music is stopped");
+  // TODO: There is a bug in SDL for Windows that makes all sound, not just music stop
+  // when pausing. For the time being, stop the music instead to prevent this.
+  this->stopBackgroundTrack();
+  return false;
+  //-----------------------------------------------
+  // Real pause logic
+  //-----------------------------------------------
+  /*local status
+  if self.background_paused then
+    self.background_paused = nil
+    status = SDL.audio.resumeMusic()
+  else
+    status = SDL.audio.pauseMusic()
+    self.background_paused = true
+  end
+
+  -- NB: Explicit false check, as old C side returned nil in all cases
+  if status == false then
+    -- SDL doesn't seem to support pausing/resuming for this format/driver,
+    -- so just stop the music instead.
+    self:stopBackgroundTrack()
+    self.background_paused = nil
+  else
+    -- SDL can also be odd and report music as paused even though it is still
+    -- playing. If it really is paused, then there is no harm in muting it.
+    -- If it wasn't really paused, then muting it is the next best thing that
+    -- we can do (even though it'll continue playing).
+    if self.background_paused then
+      self.old_bg_music_volume = self.app.config.music_volume
+      SDL.audio.setMusicVolume(0)
+    else
+      self.app.config.music_volume = self.old_bg_music_volume
+      SDL.audio.setMusicVolume(self.old_bg_music_volume)
+      self.old_bg_music_volume = nil
+    end
+  end
+  self:notifyJukebox()
+  return self.background_paused--*/
+}
+
+//! Stops playing background music for the time being.
+//! Does not affect the configuration setting play_music.
+function Audio::stopBackgroundTrack() {
+  if( this.background_paused ) {
+    // unpause first in order to clear the backupped volume
+    this->pauseBackgroundTrack();
+  }
+  SDL.audio.stopMusic();
+  this.background_music = null;
+
+  this->notifyJukebox();
+}
+
+//! Plays a given background track.
+//! Playback will only start if the configuration says it's ok. (play_music = true)
+//!param index Index of the track to play in the playlist.
+function Audio::playBackgroundTrack(index) {
+  var info = this.background_playlist[index];
+  assert(info, "Index not valid");
+  if( this.app.config.play_music ) {
+    var music = info.music;
+    if( ! music ) {
+      var data;
+      if( info.filename_mp3 ) {
+        data = assert(GetFileData(info.filename_mp3));
+      } else {
+        data = assert(this.app.fs->readContents(info.filename));
+      }
+      if( data->sub(1, 3) == "RNC" ) {
+        data = assert(rnc.decompress(data));
+      }
+      if( ! info.filename_mp3 ) {
+        data = SDL.audio.transcodeXmiToMid(data);
+      }
+      // Loading of music files can incur a slight pause, which is why it is
+      // done asynchronously.
+      // Someone might want to stop the player from
+      // starting to play once it's loaded though.
+      this.load_music = true;
+      SDL.audio.loadMusicAsync(data, function(music_data, e) {
+
+        if( music_data == null ) {
+          error("Could not load music file \'" .. (info.filename_mp3 || info.filename) .. "\'" ..
+              (e && (" (" .. e .. ")" || "")));
+        } else {
+          info.music = music_data;
+          // Do we still want it to play?
+          if( this.load_music ) {
+            return this->playBackgroundTrack(index);
+          }
+        }
+      });
+      return;
+    }
+    SDL.audio.setMusicVolume(this.app.config.music_volume);
+    assert(SDL.audio.playMusic(music));
+    this.background_music = music;
+
+    this->notifyJukebox();
+  }
+}
+
+function Audio::onMusicOver() {
+  if( this.not_loaded || #this.background_playlist == 0 || this.background_music == null ) {
+    return;
+  }
+  this->playNextBackgroundTrack();
+}
+
+function Audio::setBackgroundVolume(volume) {
+  if( this.background_paused ) {
+    this.old_bg_music_volume = volume;
+  } else {
+    this.app.config.music_volume = volume;
+    SDL.audio.setMusicVolume(volume);
+  }
+}
+
+function Audio::setSoundVolume(volume) {
+  this.app.config.sound_volume = volume;
+  if( this.sound_fx ) {
+    // Since some sounds are played automatically (using computers etc)
+    // we need to set a value on C level too.
+    this.sound_fx->setSoundVolume(volume);
+  }
+}
+
+function Audio::playSoundEffects(play_effects) {
+  this.app.config.play_sounds = play_effects;
+  if( this.sound_fx ) {
+    // As above.
+    this.sound_fx->setSoundEffectsOn(play_effects);
+  }
+
+  if( canSoundsBePlayed() ) {
+    this->tellInterestedEntitiesTheyCanNowPlaySounds();
+  }
+}
+
+function Audio::tellInterestedEntitiesTheyCanNowPlaySounds() {
+  if( table_length(this.entities_waiting_for_sound_to_be_enabled) > 0 ) {
+    for( entity, callback in pairs(this.entities_waiting_for_sound_to_be_enabled) ) {
+      callback();
+      this.entities_waiting_for_sound_to_be_enabled[entity] = null;
+    }
+  }
+}
+
+function Audio::entityNoLongerWaitingForSoundsToBeTurnedOn(entity) {
+  this.entities_waiting_for_sound_to_be_enabled[entity] = null;
+}
+
+function Audio::setAnnouncementVolume(volume) {
+  this.app.config.announcement_volume = volume;
+}
+
+// search for jukebox and notify it to update its play button
+function Audio::notifyJukebox() {
+  var jukebox = this.app.ui->getWindow(UIJukebox);
+  if( jukebox ) {
+    jukebox->updatePlayButton();
+  }
+}
+
+function Audio::reserveChannel() {
+  if( this.sound_fx ) {
+    return this.sound_fx->reserveChannel();
+  } else {
+    return -1;
+  }
+}
+
+function Audio::releaseChannel(channel) {
+  if( this.sound_fx && channel > -1 ) {
+    this.sound_fx->releaseChannel(channel);
+  }
+}

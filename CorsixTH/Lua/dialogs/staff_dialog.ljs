@@ -1,0 +1,388 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+// Test for hit within the view circle
+var /*persistable:staff_dialog_is_in_view_circle*/ function is_in_view_circle(x, y, is_handyman) {
+  var circle_center_y = is_handyman && 276 || 248;
+  return (x - 55)**2 + (y - circle_center_y)**2 < 39**2;
+}
+
+//! Individual staff information dialog
+class ("UIStaff") (Window);
+
+//-@type UIStaff
+var UIStaff = _G["UIStaff"];
+
+//! Callback function for handyman to change his parcel.
+function UIStaff::changeParcel() {
+  var index = 0;
+  for( i, v in ipairs(this.staff.hospital.ownedPlots) ) {
+    if( v == this.staff.parcelNr ) {
+      index = i;
+      break;
+    }
+  }
+  if( ! this.staff.hospital.ownedPlots[index + 1] ) {
+    this.staff.parcelNr = 0;
+  } else {
+    this.staff.parcelNr = this.staff.hospital.ownedPlots[index + 1];
+  }
+}
+
+function UIStaff::getParcelText() {
+  if( ! this.staff.parcelNr ) {
+    this.staff.parcelNr = 0;
+  }
+  if( this.staff.parcelNr == 0 ) {
+    return _S.handyman_window.all_parcels; //"All parcels"
+  } else {
+    return _S.handyman_window.parcel .. " " .. this.staff.parcelNr;
+  }
+}
+
+function UIStaff::UIStaff(ui, staff) {
+  this->Window();
+
+  var app = ui.app;
+  var profile = staff.profile;
+  this.esc_closes = true;
+  this.staff = staff;
+  this.ui = ui;
+  this.modal_class = "humanoid_info";
+  this.width = 220;
+  if( profile.humanoid_class == "Handyman" ) {
+    this.height = 332;
+  } else {
+    this.height = 304;
+  }
+  this->setDefaultPosition(-20, 30);
+  this.panel_sprites = app.gfx->loadSpriteTable("QData", "Req01V", true);
+  this.white_font = app.gfx->loadFont("QData", "Font01V");
+  this.face_parts = app.gfx->loadRaw("Face01V", 65, 1350, null, "Data", "MPalette.dat");
+
+  this->addPanel(297,   15,   0); // Dialog header
+  for( y = 51, 121, 10 ) {
+    this->addPanel(298, 15,   y); // Dialog background
+  }
+  this->addPanel(299,  104,  50); // Happiness
+  this->addPanel(300,  105,  82); // Tiredness
+  this->addPanel(301,   15, 114); // Skills/Abilities
+  this->addColourPanel(35, 51, 71, 81, 208, 252, 252)->makeButton(0, 0, 71, 81, null, this.openStaffManagement)->setTooltip(_S.tooltip.staff_window.face); // Portrait background
+
+  if( profile.humanoid_class == "Handyman" ) {
+    this->addPanel(311,  15, 131); // Tasks top
+    for( y = 149, 184, 5 ) {
+      this->addPanel(312, 15,  y); // Tasks buttons
+    }
+    this->addPanel(302,   5, 205); // View circle top/Wage
+    this->addPanel(313,  15, 189); // Tasks bottom
+    this->addPanel(314,  37, 145)->makeRepeatButton(0, 0, 49, 48, 315, this.doMoreCleaning)->setTooltip(_S.tooltip.handyman_window.prio_litter);
+    this->addPanel(316,  92, 145)->makeRepeatButton(0, 0, 49, 48, 317, this.doMoreWatering)->setTooltip(_S.tooltip.handyman_window.prio_plants);
+    this->addPanel(318, 148, 145)->makeRepeatButton(0, 0, 49, 48, 319, this.doMoreRepairing)->setTooltip(_S.tooltip.handyman_window.prio_machines);
+    this->addPanel(240,  21, 210)->makeButton(0, 0, 73, 30, 240, this.changeParcel)->setTooltip(_S.tooltip.handyman_window.parcel_select);
+  this->addPanel(303,   0, 253); // View circle midpiece
+    this->addPanel(304,   6, 302); // View circle bottom
+    this->addPanel(307, 106, 253)->makeButton(0, 0, 50, 50, 308, this.fireStaff)->setTooltip(_S.tooltip.staff_window.sack);
+    this->addPanel(309, 164, 253)->makeButton(0, 0, 37, 50, 310, this.placeStaff)->setTooltip(_S.tooltip.staff_window.pick_up);
+  } else {
+    this->addPanel(302,   5, 178); // View circle top/Wage
+    this->addPanel(303,   0, 226); // View circle midpiece
+    this->addPanel(304,   6, 274); // View circle bottom
+    if( profile.humanoid_class != "Doctor" ) {
+      this->addColourPanel(32, 141, 171, 39, 85, 202, 219);  // Hides Skills
+    }
+    this->addPanel(307, 106, 226)->makeButton(0, 0, 50, 50, 308, this.fireStaff)->setTooltip(_S.tooltip.staff_window.sack);
+    this->addPanel(309, 164, 226)->makeButton(0, 0, 37, 50, 310, this.placeStaff)->setTooltip(_S.tooltip.staff_window.pick_up);
+  }
+
+  this->addPanel(305, 178,  18)->makeButton(0, 0, 24, 24, 306, this.close)->setTooltip(_S.tooltip.staff_window.close);
+
+  this->makeTooltip(_S.tooltip.staff_window.name, 33, 19, 172, 42);
+  this->makeTooltip(_S.tooltip.staff_window.happiness, 113,  49, 204,  74);
+  this->makeTooltip(_S.tooltip.staff_window.tiredness, 113,  74, 204, 109);
+  this->makeTooltip(_S.tooltip.staff_window.ability,   113, 109, 204, 134);
+
+  if( profile.humanoid_class == "Doctor" ) {
+    this->makeTooltip(_S.tooltip.staff_window.doctor_seniority, 30, 141, 111, 182);
+    this->makeTooltip(_S.tooltip.staff_window.skills, 111, 146, 141, 179);
+
+    var skill_to_string = {
+      is_surgeon = _S.tooltip.staff_window.surgeon,
+      is_psychiatrist = _S.tooltip.staff_window.psychiatrist,
+      is_researcher = _S.tooltip.staff_window.researcher,
+    };
+    var /*persistable:staff_dialog_skill_tooltip_template*/ function skill_tooltip(skill) {
+      return /*persistable:staff_dialog_skill_tooltip*/ function() {
+        if( profile[skill] >= 1.0 ) {
+          return skill_to_string[skill];
+        }
+      };
+    }
+
+    this->makeDynamicTooltip(skill_tooltip("is_surgeon"),      143, 148, 155, 177);
+    this->makeDynamicTooltip(skill_tooltip("is_psychiatrist"), 155, 148, 177, 177);
+    this->makeDynamicTooltip(skill_tooltip("is_researcher"),   177, 148, 202, 177);
+  }
+
+  // window for handyman is slightly different
+  var offset = profile.humanoid_class == "Handyman" && 27 || 0;
+
+  this->makeTooltip(_S.tooltip.staff_window.salary, 90, 191 + offset, 204, 214 + offset);
+  // Non-rectangular tooltip has to be realized with dynamic tooltip at the moment
+  this->makeDynamicTooltip(/*persistable:staff_dialog_center_tooltip*/function(x, y) {
+    if( is_in_view_circle(x, y, profile.humanoid_class == "Handyman") ) {
+      return _S.tooltip.staff_window.center_view;
+    }
+  }, 17, 211 + offset, 92, 286 + offset);
+
+}
+
+function UIStaff::getStaffPosition(dx, dy) {
+  var staff = this.staff;
+  var x, y = this.ui.app.map->WorldToScreen(staff.tile_x, staff.tile_y);
+  var px, py = staff.th->getMarker();
+  return x + px - (dx || 0), y + py - (dy || 0);
+}
+
+function UIStaff::draw(canvas, x_, y_) {
+  var x, y = this.x + x_, this.y + y_;
+
+  var px, py = this->getStaffPosition(37, 61);
+  this.ui.app.map->draw(canvas, px, py, 75, 75, x + 17, y + this.height - 93);
+  Window.draw(this, canvas, x_, y_);
+
+  var profile = this.staff.profile;
+  var font = this.white_font;
+
+  font->draw(canvas, profile.name, x + 42, y + 28); // Name
+  if( profile.humanoid_class == "Handyman" ) {
+    font->draw(canvas, "$" .. profile.wage, x + 135, y + 226); // Wage
+    font->draw(canvas, this->getParcelText(), x + 35, y + 215, 50, 0);
+    // The concentration areas
+    if( this.staff.attributes["cleaning"] ) { // Backwards compatibility
+      var cleaning_width = math.floor(this.staff.attributes["cleaning"] * 40 + 0.5);
+      var watering_width = math.floor(this.staff.attributes["watering"] * 40 + 0.5);
+      var repairing_width = math.floor(this.staff.attributes["repairing"] * 40 + 0.5);
+      if( cleaning_width != 0 ) {
+        for( dx = 0, cleaning_width - 1 ) {
+          this.panel_sprites->draw(canvas, 351, x + 43 + dx, y + 200);
+        }
+      }
+      if( watering_width != 0 ) {
+        for( dx = 0, watering_width - 1 ) {
+          this.panel_sprites->draw(canvas, 351, x + 99 + dx, y + 200);
+        }
+      }
+      if( repairing_width != 0 ) {
+        for( dx = 0, repairing_width - 1 ) {
+          this.panel_sprites->draw(canvas, 351, x + 155 + dx, y + 200);
+        }
+      }
+    }
+  } else {
+    font->draw(canvas, "$" .. profile.wage, x + 135, y + 199); // Wage
+  }
+
+  if( this.staff.attributes["happiness"] ) {
+    var happiness_bar_width = math.floor(this.staff.attributes["happiness"] * 40 + 0.5);
+    if( happiness_bar_width != 0 ) {
+      for( dx = 0, happiness_bar_width - 1 ) {
+        this.panel_sprites->draw(canvas, 348, x + 139 + dx, y + 56);
+      }
+    }
+  }
+
+  var fatigue_bar_width = 40.5;
+  if( this.staff.attributes["fatigue"] ) {
+    fatigue_bar_width = math.floor((1 - this.staff.attributes["fatigue"]) * 40 + 0.5);
+  }
+  if( fatigue_bar_width != 0 ) {
+    for( dx = 0, fatigue_bar_width - 1 ) {
+      this.panel_sprites->draw(canvas, 349, x + 139 + dx, y + 89);
+    }
+  }
+
+  var skill_bar_width = math.floor(profile.skill * 40 + 0.5);
+  if( skill_bar_width != 0 ) {
+    for( dx = 0, skill_bar_width - 1 ) {
+      this.panel_sprites->draw(canvas, 350, x + 139 + dx, y + 120);
+    }
+  }
+
+  if( profile.humanoid_class == "Doctor" ) {
+    // Junior / Doctor / Consultant marker
+    if( profile.is_junior ) {
+      this.panel_sprites->draw(canvas, 347, x + 38, y + 173);
+    } else if( profile.is_consultant ) {
+      this.panel_sprites->draw(canvas, 347, x + 89, y + 173);
+    } else {
+      this.panel_sprites->draw(canvas, 347, x + 60, y + 173);
+    }
+    // Ability markers
+    if( profile.is_surgeon >= 1.0 ) {
+      this.panel_sprites->draw(canvas, 344, x + 144, y + 148);
+    }
+    if( profile.is_psychiatrist >= 1.0 ) {
+      this.panel_sprites->draw(canvas, 345, x + 155, y + 154);
+    }
+    if( profile.is_researcher >= 1.0 ) {
+      this.panel_sprites->draw(canvas, 346, x + 178, y + 153);
+    }
+  }
+
+  profile->drawFace(canvas, x + 38, y + 54, this.face_parts); // Portrait
+}
+
+function UIStaff::onMouseDown(button, x, y) {
+  this.do_scroll = button == "left" && is_in_view_circle(x, y, this.staff.profile.humanoid_class == "Handyman");
+  return Window.onMouseDown(this, button, x, y);
+}
+
+// Helper function to facilitate humanoid_class comparison wrt. Surgeons
+var function surg_compat(class) {
+  return class == "Surgeon" && "Doctor" || class;
+}
+
+function UIStaff::onMouseUp(button, x, y) {
+  var ui = this.ui;
+  if( button == "left" ) {
+    this.do_scroll = false;
+  }
+  var repaint = Window.onMouseUp(this, button, x, y);
+  // Test for hit within the view circle
+  if( button == "right" && is_in_view_circle(x, y, this.staff.profile.humanoid_class == "Handyman") ) {
+    // Right click goes to the next staff member of the same category (NB: Surgeon in same Category as Doctor)
+    var staff_index = null;
+    for( i, staff in ipairs(ui.hospital.staff) ) {
+      if( staff_index && surg_compat(staff.humanoid_class) == surg_compat(this.staff.humanoid_class) ) {
+        ui->addWindow(UIStaff(ui, staff));
+        return false;
+      }
+      if( staff == this.staff ) {
+        staff_index = i;
+      }
+    }
+    // Try again from beginning of list until staff_index
+    for( i = 1, staff_index - 1 ) {
+      var staff = ui.hospital.staff[i];
+      if( surg_compat(staff.humanoid_class) == surg_compat(this.staff.humanoid_class) ) {
+        ui->addWindow(UIStaff(ui, staff));
+        return false;
+      }
+    }
+  }
+  return repaint;
+}
+
+function UIStaff::onMouseMove(x, y, dx, dy) {
+  this.do_scroll = this.do_scroll && is_in_view_circle(x, y, this.staff.profile.humanoid_class == "Handyman");
+  return Window.onMouseMove(this, x, y, dx, dy);
+}
+
+function UIStaff::onTick() {
+  if( this.do_scroll ) {
+    var ui = this.ui;
+    var staff = this.staff;
+    var sx, sy = ui.app.map->WorldToScreen(staff.tile_x, staff.tile_y);
+    var dx, dy = staff.th->getPosition();
+    ui->scrollMapTo(sx + dx, sy + dy);
+  }
+  return Window.onTick(this);
+}
+
+function UIStaff::placeStaff() {
+  this.staff.pickup = true;
+  this.staff->setNextAction(PickupAction(this.ui)->setTodoClose(this), true);
+}
+
+function UIStaff::fireStaff() {
+  this.ui->addWindow(UIConfirmDialog(this.ui, _S.confirmation.sack_staff, /*persistable:staff_dialog_confirm_sack*/ function() {
+    this.staff->fire();
+  }));
+}
+
+
+//! Function to balance 'cleaning','watering', and 'repairing', where
+//! one of them is increased, and the other two are decreased.
+//!param increased Attribute to increase.
+function UIStaff::changeHandymanAttributes(increased) {
+  if( ! this.staff.attributes[increased] ) {
+    return;
+  }
+
+  var incr_value = 0.1;  // Increase of 'increased'
+  var smallest_decr = 0.05; // Smallest decrement that can be performed.
+  var decr_attrs = {};
+
+  var attributes = {"cleaning", "watering", "repairing"};
+  for( _, attr in ipairs(attributes) ) {
+    if( attr == increased ) {
+      // Adding too much is not a problem, it gets clipped to 1.
+      this.staff->changeAttribute(attr, incr_value);
+      if( this.staff.attributes[attr] == 1 ) {
+        incr_value = 2.0; // Doing 'increased' 100%, set other attributes to 0.
+      }
+    } else {
+      decr_attrs[#decr_attrs + 1] = attr;
+      smallest_decr = math.min(smallest_decr, this.staff.attributes[attr]);
+    }
+  }
+  assert(#decr_attrs == 2);
+
+  // The decreasing attributes should together decrease '-incr_value', but one
+  // or both may be smaller than '-incr_value / 2'.
+  // Compensate by subtracting the biggest value from both.
+  var decr_value = incr_value - smallest_decr;
+  for( _, attr in ipairs(decr_attrs) ) {
+    // Subtracting too much is not a problem, it gets clipped to 0.
+    this.staff->changeAttribute(attr, -decr_value);
+  }
+}
+
+//! UI callback function to increase 'cleaning' (wiping litter).
+function UIStaff::doMoreCleaning() {
+  this->changeHandymanAttributes("cleaning");
+}
+
+//! UI callback function to increase 'watering' (plants).
+function UIStaff::doMoreWatering() {
+  this->changeHandymanAttributes("watering");
+}
+
+//! UI callback function to increase 'repairing' (machines).
+function UIStaff::doMoreRepairing() {
+  this->changeHandymanAttributes("repairing");
+}
+
+function UIStaff::openStaffManagement() {
+  var dlg = UIStaffManagement(this.ui);
+  // Make sure that the dialog managed to create itself properly.
+  // For example, if using the demo files closed will be true because the dialog could not be loaded.
+  if( ! dlg.closed ) {
+    dlg->selectStaff(this.staff);
+    this.ui->addWindow(dlg);
+    this->close();
+  }
+}
+
+function UIStaff::hitTest(x, y) {
+  return Window.hitTest(this, x, y) || is_in_view_circle(x, y, this.staff.profile.humanoid_class == "Handyman");
+}
+

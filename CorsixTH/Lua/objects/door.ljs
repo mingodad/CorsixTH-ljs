@@ -1,0 +1,193 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var object = {};
+object.id = "door";
+object.thob = 3;
+object.name = _S.object.door;
+object.tooltip = _S.tooltip.objects.door;
+object.class = "Door";
+object.ticks = false;
+object.idle_animations = {
+  north = 104,
+  west = 106,
+};
+
+corsixth.require("queue");
+
+class ("Door") (Object);
+
+//-@type Door
+var Door = _G["Door"];
+
+function Door::Door(...) {
+  this->Object(...);
+  this.queue = Queue();
+  // Priority should be given to humanoids already inside the door's room, as
+  // otherwise we could end up in a situation where a patient trying to leave
+  // a room is in the queue behind a patient trying to enter, and the entering
+  // one cannot enter until the leaving one has left, etc.
+  this.queue->setPriorityForSameRoom(this);
+  this.hover_cursor = TheApp.gfx->loadMainCursor("queue");
+  // self.user = "locked" -- prevents doors from being used (debug aid)
+}
+
+
+function Door::getRoom() {
+  return this.room;
+}
+
+function Door::updateDynamicInfo() {
+  if( this.room && this.queue ) {
+    if( ! this.room->hasQueueDialog() ) {
+      this->setDynamicInfo('text', {
+        this.room.room_info.name
+      });
+    } else {
+      this->setDynamicInfo('text', {
+        this.room.room_info.name,
+        _S.dynamic_info.object.queue_size->format(this.queue->reportedSize()),
+        _S.dynamic_info.object.queue_expected->format(this.queue->expectedSize())
+      });
+    }
+  }
+}
+
+function Door::onClick(ui, button) {
+  var room = this->getRoom();
+  if( button == "left" && room->hasQueueDialog() && this.queue ) {
+    var queue_window = UIQueue(ui, this.queue);
+    ui->addWindow(queue_window);
+  }
+}
+
+var door_flag_name = {
+  north = {"doorNorth", "tallNorth"},
+  west = {"doorWest", "tallWest"},
+};
+
+function Door::setTile(x, y) {
+  var map = this.world.map;
+  var flag_names = door_flag_name[this.direction];
+  var todo_cleanup;
+  if( this.tile_x ) {
+    // NB: unsetting buildable flag has to be done AFTER removing the object
+    //     from its former tile in Object.setTile
+    todo_cleanup = this->getWalkableTiles();
+    map->setCellFlags(this.tile_x, this.tile_y, {
+      [flag_names[1]] = false,
+      [flag_names[2]] = false,
+    });
+    for( _, xy in ipairs(this->getWalkableTiles()) ) {
+      map->setCellFlags(xy[1], xy[2], {doNotIdle = false});
+    }
+  }
+  Object.setTile(this, x, y);
+  if( todo_cleanup ) {
+    // passable tiles can "belong" to multiple objects, so we have to check that
+    // assumption: no object defines a passable tile further than 10 tiles away from its origin
+    for( _, xy in ipairs(todo_cleanup) ) {
+      if( ! this.world->isTilePartOfNearbyObject(xy[1], xy[2], 10) ) {
+        map->setCellFlags(xy[1], xy[2], {buildable = true});
+      }
+    }
+  }
+  if( x ) {
+    map->setCellFlags(x, y, {
+      [flag_names[1]] = true,
+      [flag_names[2]] = true,
+    });
+    for( _, xy in ipairs(this->getWalkableTiles()) ) {
+      map->setCellFlags(xy[1], xy[2], {buildable = false, doNotIdle = true});
+    }
+  }
+  map.th->updateShadows();
+  return this;
+}
+
+function Door::getWalkableTiles() {
+  var x, y = this.tile_x, this.tile_y;
+  if( this.direction == "west" ) {
+    --x    ;
+  } else {
+    --y    ;
+  }
+  return { {this.tile_x, this.tile_y}, {x, y} };
+}
+
+var flag_early_list = 1024;
+var flag_list_bottom = 2048;
+
+function Door::setAnimation(animation, flags) {
+  flags = (flags || 0) + flag_list_bottom;
+  if( this.direction == "north" ) {
+    flags +=   flag_early_list;
+  }
+  return Object.setAnimation(this, animation, flags);
+}
+
+function Door::closeDoor() {
+  if( this.queue ) {
+    this.queue->rerouteAllPatients(SeekRoomAction(this->getRoom().room_info.id));
+    this.queue = null;
+  }
+  this->clearDynamicInfo(null);
+  this.hover_cursor = null;
+}
+
+function Door::getDrawingLayer() {
+  return 0;
+}
+
+function Door::checkForDeadlock() {
+  // In an ideal world, deadlocks should not occur, as they indicate errors in
+  // some logic elsewhere. From a practical point of view, we should check for
+  // deadlocks from time to time and attempt to fix them.
+  if( this.queue && this.reserved_for ) {
+    // If the door is reserved for someone, then that person should either be
+    // at the front of the queue, or not in any queues at all.
+    for( _, action in ipairs(this.reserved_for.action_queue) ) {
+      if( action.name == "queue" ) {
+        if( action.queue != this.queue || this.queue[1] != this.reserved_for ) {
+          this.reserved_for = null;
+          this->getRoom()->tryAdvanceQueue();
+        }
+        break;
+      }
+    }
+  }
+}
+
+function Door::afterLoad(old, new) {
+  if( old < 57 ) {
+    var flags_to_set;
+    var map = this.world.map;
+    if( this.direction == "west" ) {
+      flags_to_set = {buildableNorth = false, buildableSouth = false};
+      map->setCellFlags(this.tile_x, this.tile_y, flags_to_set);
+      map->setCellFlags(this.tile_x - 1, this.tile_y, flags_to_set);
+    } else {
+      flags_to_set = {buildableEast = false, buildableWest = false};
+      map->setCellFlags(this.tile_x, this.tile_y, flags_to_set);
+      map->setCellFlags(this.tile_x, this.tile_y - 1, flags_to_set);
+    }
+  }
+}
+return object;

@@ -1,0 +1,196 @@
+/* Copyright (c) 2010 Miika-Petteri Matikainen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+
+//! Dialog for staff member requesting a salaray raise.
+class ("UIStaffRise") (Window);
+
+//-@type UIStaffRise
+var UIStaffRise = _G["UIStaffRise"];
+
+function UIStaffRise::UIStaffRise(ui, staff, rise_amount) {
+  this->Window();
+  var app = ui.app;
+  var profile = staff.profile;
+
+  this.esc_closes = false; // Do not allow closing the dialog with esc
+  this.staff = staff;
+  this.ui = ui;
+  this.rise_amount = rise_amount;
+  this.on_top = true;
+
+  var final_wage = this.staff.profile.wage + rise_amount;
+  this.text = _S.pay_rise.regular.__random->format(rise_amount, final_wage); // Random complaint text
+
+  this.width = 366;
+  this.height = 275;
+
+  // Center the dialog
+  this->setDefaultPosition(0.5, 0.5);
+
+  this.panel_sprites = app.gfx->loadSpriteTable("QData", "Req12V", true);
+  this.white_font = app.gfx->loadFont("QData", "Font01V");
+  this.black_font = app.gfx->loadFont("QData", "Font00V");
+  this.face_parts = app.gfx->loadRaw("Face01V", 65, 1350, null, "Data", "MPalette.dat");
+
+  // Left hand side
+  this->addPanel(280, 0, 0);
+  this->addPanel(281, 0, 54);
+  this->addPanel(281, 0, 64);
+  this->addPanel(281, 0, 64);
+  this->addPanel(281, 0, 74);
+  this->addPanel(281, 0, 84);
+  this->addPanel(281, 0, 94);
+  this->addPanel(281, 0, 104);
+  this->addPanel(282, 0, 114);
+  this->addPanel(283, 0, 171);
+  this->addPanel(284, 0, 214);
+  this->addColourPanel(96, 44, 72, 81, 211, 255, 255); // Portrait background
+
+  // Right hand side
+  this->addPanel(285, 180, 0);
+  this->addPanel(286, 180, 20);
+  this->addPanel(286, 180, 48);
+  this->addPanel(286, 180, 76);
+  this->addPanel(286, 180, 104);
+  this->addPanel(286, 180, 132);
+  this->addPanel(286, 180, 160);
+  this->addPanel(287, 180, 188);
+  this->addPanel(288, 180, 233)->makeButton(0, 0, 90, 45, 289, this.increaseSalary)->setTooltip(_S.tooltip.pay_rise_window.accept);
+  this->addPanel(290, 270, 233)->makeButton(0, 0, 90, 45, 291, this.fireStaff)->setTooltip(_S.tooltip.pay_rise_window.decline);
+
+  this->makeTooltip(_S.tooltip.staff_window.name, 14, 15, 169, 38);
+  this->makeTooltip(_S.tooltip.staff_window.face, 96, 44, 168, 125);
+  this->makeTooltip(_S.tooltip.staff_window.salary, 14, 171, 168, 193);
+  this->makeTooltip(_S.tooltip.staff_window.ability, 12, 213, 89, 243);
+
+  if( profile.humanoid_class == "Doctor" ) {
+    this->makeTooltip(_S.tooltip.staff_window.doctor_seniority, 89, 197, 168, 243);
+    this->makeTooltip(_S.tooltip.staff_window.skills, 14, 132, 47, 166);
+
+    // NB: should be sufficient here to check only once, not make a dynamic tooltip
+    if( profile.is_surgeon >= 1.0 ) {
+      this->makeTooltip(_S.tooltip.staff_window.surgeon, 72, 133, 87, 164);
+    }
+    if( profile.is_psychiatrist >= 1.0 ) {
+      this->makeTooltip(_S.tooltip.staff_window.psychiatrist, 87, 133, 116, 164);
+    }
+    if( profile.is_researcher >= 1.0 ) {
+      this->makeTooltip(_S.tooltip.staff_window.researcher, 116, 133, 146, 164);
+    }
+  } else {
+    // Hide doctor specific information
+    this->addColourPanel(10, 130, 160, 40, 60, 174, 203);
+    this->addColourPanel(89, 198, 81, 45, 60, 174, 203);
+  }
+}
+
+function UIStaffRise::getStaffPosition(dx, dy) {
+  var staff = this.staff;
+  var x, y = this.ui.app.map->WorldToScreen(staff.tile_x, staff.tile_y);
+  var px, py = staff.th->getMarker();
+  return x + px - (dx || 0), y + py - (dy || 0);
+}
+
+function UIStaffRise::draw(canvas, x, y) {
+  Window.draw(this, canvas, x, y);
+  var profile = this.staff.profile;
+  x, y = this.x + x, this.y + y;
+  var px, py = this->getStaffPosition(37, 61);
+  var font = this.white_font;
+
+  profile->drawFace(canvas, x + 99, y + 47, this.face_parts); // Portrait
+  this.ui.app.map->draw(canvas, px, py, 71, 81, x + 16, y + 44); // Viewport
+
+  font->draw(canvas, profile.name, x + 20, y + 20); // Name
+  font->draw(canvas, "$" .. profile.wage, x + 60, y + 178); // Wage
+
+  // Ability
+  // Note: The bar looks like "attention to detail", but actually ability level
+  // is displayed here. This was the same in TH, and makes more sense.
+  // However at some point we should fix the graphics to look like an ability bar.
+  var ability_bar_width = math.floor(profile.skill * 40 + 0.5);
+  if( ability_bar_width != 0 ) {
+    for( dx = 0, ability_bar_width - 1 ) {
+      this.panel_sprites->draw(canvas, 295, x + 42 + dx, y + 230);
+    }
+  }
+
+  if( this.staff.profile.humanoid_class == "Doctor" ) {
+    this->drawDoctorAttributes(canvas);
+  }
+
+  // Complaint text
+  this.black_font->drawWrapped(canvas, this.text, x + 200, y + 20, 140);
+}
+
+function UIStaffRise::drawDoctorAttributes(canvas) {
+  var profile = this.staff.profile;
+  var x, y = this.x, this.y;
+
+  // Junior / Doctor / Consultant marker
+  var marker_x = x + 98;
+  if( profile.is_junior ) {
+  } else if( profile.is_consultant ) {
+    marker_x +=   52;
+  } else {
+    marker_x +=   22;
+  }
+
+  this.panel_sprites->draw(canvas, 296, marker_x, y + 230);
+
+  // Ability markers
+  if( profile.is_surgeon >= 1.0 ) {
+    this.panel_sprites->draw(canvas, 292, x + 74, y + 133);
+  }
+  if( profile.is_psychiatrist >= 1.0 ) {
+    this.panel_sprites->draw(canvas, 293, x + 90, y + 139);
+  }
+  if( profile.is_researcher >= 1.0 ) {
+    this.panel_sprites->draw(canvas, 294, x + 120, y + 138);
+  }
+}
+
+function UIStaffRise::fireStaff() {
+  this.staff.message_callback = null;
+  this.staff->fire();
+  this->close();
+  var world = this.ui.app.world;
+  if( world && world->isCurrentSpeed("Pause") ) {
+    world->setSpeed(world.prev_speed);
+  }
+}
+
+function UIStaffRise::increaseSalary() {
+  this.staff.message_callback = null;
+  this.staff->increaseWage(this.rise_amount);
+  this.staff.quitting_in = null;
+  this->close();
+  var world = this.ui.app.world;
+  if( world && world->isCurrentSpeed("Pause") ) {
+    world->setSpeed(world.prev_speed);
+  }
+}
+
+function UIStaffRise::afterLoad(old, new) {
+  if( ! this.black_font ) {
+    this.black_font = this.ui.app.gfx->loadFont("QData", "Font00V");
+  }
+}

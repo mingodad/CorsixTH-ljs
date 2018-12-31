@@ -1,0 +1,175 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//-- Primitive class system ---------------------------------------------------
+// Declaring a class:
+//  class "Name"
+// OR
+//  class "Name" (SuperclassName)
+//
+//  ---@type Name
+//  local Name = _G["Name"]
+//
+//  function Name:Name(arguments)
+//    self:SuperclassName(arguments) -- required when there is a superclass
+//    --(constructor)--
+//  end
+//  function Name:method(arguments)
+//    --(generic method)--
+//  end
+//
+// Creating a class instance:
+//  variable = Name(constructor_arguments)
+//
+// Classes can also be made by "adopting" a table - taking an existing table
+// and turning it into a class instance, rather than always creating a new
+// table when the constructor is called. To enable this, put "{}" after the
+// class declaration, as in:
+//  class "NameWhichAdopts" {}
+// Then the first argument to the constructor is treated as a table to turn
+// into an instance of the class, as in:
+//  variable = NameWhichAdopts{named_constructor_argument = 42, another = 43}
+//
+// Using a class instance:
+//  variable:method(arguments)
+// OR
+//  Name.method(variable, arguments)
+//
+// The latter form can be used to call a method of a superclass when the
+// subclass overrides it with a method of the same name.
+// C code does not use this file, but does use the same syntax for creating a
+// class instance and calling methods on it.
+
+var setmetatable, getmetatable, type
+    = setmetatable, getmetatable, type;
+
+var function define_class(name, super, adopts_self) {
+  var mt = {};
+
+  var function new_class(methods, ...) {
+    var constructor = methods[name];
+    var this;
+    if( adopts_self && ... ) {
+      this = setmetatable(..., mt);
+      constructor(...);
+    } else {
+      this = setmetatable({}, mt);
+      constructor(this, ...);
+    }
+    return this;
+  }
+
+  var methods = {};
+  var methods_mt = {};
+
+  mt.__index = methods;
+  setmetatable(methods, methods_mt);
+  if( super != null ) {
+    methods_mt.__index = super;
+  }
+  methods_mt.__call = new_class;
+  methods_mt.__class_name = name;
+
+  methods._metatable = mt;
+  _G[name] = methods;
+}
+
+strict_declare_global ("class");
+class = destrict(function(_, name) {
+  define_class(name);
+  var adopts_self = false;
+  var super = null;
+
+  var function extend(arg) {
+    if( type(arg) == "table" && next(arg) == null && ! getmetatable(arg) ) {
+      // {} decorator
+      adopts_self = true;
+    } else {
+      // (Superclass) decorator
+      if( arg == null ) {
+        error("Superclass not defined at subclass definition");
+      }
+      super = arg;
+    }
+    define_class(name, super, adopts_self);
+    return extend;
+  }
+  return extend;
+});
+class = setmetatable({}, {__call = class});
+
+// class.is - Tests if a given class object (first parameter) is an instance
+// of (something derived from) a given type (second parameter).
+// For example:
+// class "something" (base)
+// class "something_else"
+// variable = something()
+// class.is(variable, something) --> true
+// class.is(variable, base) --> true
+// class.is(variable, something_else) --> false
+function class.is(instance, class) {
+  var typ = type(instance);
+  if( typ != "table" && typ != "userdata" ) {
+    return false;
+  }
+  var methods = instance;
+  while( methods ) {
+    if( methods == class ) {
+      return true;
+    }
+    var mt = getmetatable(methods);
+    methods = mt && mt.__index;
+  }
+  return false;
+}
+
+// class.name - Get the name of a class
+// For example:
+// class "something"
+// class.name(something) --> "something"
+function class.name(class) {
+  var mt = getmetatable(class);
+  return mt && mt.__class_name;
+}
+
+// class.superclass - Get the superclass of a class
+// For example:
+// class "something" (base)
+// class.superclass(something) --> base
+function class.superclass(class) {
+  return getmetatable(class).__index;
+}
+
+// class.type - Get the typename of a class instance
+// For example:
+// class "something" (base)
+// variable = something()
+// class.type(variable) --> "something"
+function class.type(instance) {
+  var mt = getmetatable(instance);
+  if( ! mt ) {
+    return null;
+  }
+  var methods_mt = getmetatable(mt.__index);
+  if( ! methods_mt ) {
+    return null;
+  }
+  return methods_mt.__class_name;
+}

@@ -1,0 +1,408 @@
+/* Copyright (c) 2010 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("LuaNode");
+class ("LuaVariable") (LuaNode);
+class ("LuaFunction") (LuaVariable);
+class ("LuaTable") (LuaVariable);
+class ("LuaClass") (LuaTable);
+class ("LuaFile") (LuaNode);
+class ("LuaDirectory") (LuaNode);
+class ("LuaProject") (LuaNode);
+
+function LuaProject::LuaProject() {
+  this->LuaNode();
+  this.globals = LuaTable();
+  this.files = LuaDirectory();
+}
+
+function LuaNode::LuaNode() {
+  this.name = null;
+  this.parent = null;
+  this.short_desc = null;
+  this.long_desc = null;
+  this.file = null;
+  this.line = null;
+}
+
+function LuaVariable::LuaVariable() {
+  this->LuaNode();
+  this.type = null;
+}
+
+function LuaNode::setFile(file, line) {
+  this.file = file;
+  this.line = line;
+  return this;
+}
+
+function LuaNode::getFile() {
+  return this.file;
+}
+
+function LuaNode::getLine() {
+  return this.line;
+}
+
+function LuaNode::setName(name) {
+  this.name = name;
+  return this;
+}
+
+function LuaNode::getName(name) {
+  return this.name;
+}
+
+function LuaVariable::getId() {
+  var id;
+  if( this.name ) {
+    id = this.name->gsub("_","__")->gsub("[A-Z]", function(c) { return "_" .. c->lower(); });
+  } else {
+    id = "_0";
+  }
+  if( this.parent ) {
+    id = this.parent->getId() .."_1".. id;
+  }
+  return id;
+}
+
+function LuaNode::setShortDesc(desc) {
+  this.short_desc = desc;
+  return this;
+}
+
+function LuaNode::getShortDesc() {
+  return this.short_desc;
+}
+
+function LuaNode::setLongDesc(desc) {
+  this.long_desc = desc;
+  return this;
+}
+
+function LuaNode::getLongDesc() {
+  return this.long_desc;
+}
+
+function LuaVariable::setParent(parent) {
+  assert(this.parent == null);
+  if( class.is(parent, LuaTable) ) {
+    parent->addMember(this);
+  } else {
+    error ("Unknown parent type");
+  }
+  this.parent = parent;
+  return this;
+}
+
+function LuaNode::getParent() {
+  return this.parent;
+}
+
+function LuaFunction::LuaFunction() {
+  this->LuaVariable();
+  this.type = "function";
+  this.return_type = null;
+  this.parameters = {};
+  this.return_values = {};
+  this.short_desc = null;
+  this.long_desc = null;
+  this.examples = {};
+  this.is_method = false;
+  this.is_vararg = false;
+  this.vararg_parameter = null;
+  this.is_dummy = false;
+}
+
+function LuaFunction::setIsDummy(is) {
+  this.is_dummy = is;
+  return this;
+}
+
+function LuaFunction::setIsMethod(is) {
+  this.is_method = is;
+  return this;
+}
+
+function LuaFunction::isMethod() {
+  return this.is_method;
+}
+
+function LuaFunction::setIsVararg(is) {
+  this.is_vararg = is;
+  if( is ) {
+    this.vararg_parameter = LuaVariable()->setName("...");
+  } else {
+    this.vararg_parameter = null;
+  }
+  return this;
+}
+
+function LuaFunction::addParameter(p) {
+  p.parent = this;
+  this.parameters[#this.parameters + 1] = p;
+  return this;
+}
+
+function LuaFunction::parameterPairs() {
+  var i = 0;
+  return function() {
+    ++i    ;
+    var p = this.parameters[i];
+    if( ! p ) {
+      if( this.is_vararg && i - 1 == #this.parameters ) {
+        return "...", this.vararg_parameter;
+      }
+      return;
+    }
+    return p->getName(), p;
+  };
+}
+
+function LuaFunction::getParameter(name) {
+  for( _, param in ipairs(this.parameters) ) {
+    if( param->getName() == name ) {
+      return param;
+    }
+  }
+  if( name == "..." ) {
+    return this.vararg_parameter;
+  }
+}
+
+function LuaTable::LuaTable() {
+  this->LuaVariable();
+  this.type = "table";
+  this.members = {};
+  this.members_sorted = true;
+  this.inherits_from = null;
+}
+
+function LuaTable::inheritFrom(other) {
+  this.inherits_from = other;
+}
+
+function LuaTable::addMember(member) {
+  assert(member.parent == null);
+  member.parent = this;
+  this.members[#this.members + 1] = member;
+  this.members_sorted = false;
+  return this;
+}
+
+function LuaTable::removeMember(member) {
+  assert(member.parent == this);
+  for( i, val in ipairs(this.members) ) {
+    if( val == member ) {
+      table.remove(this.members, i);
+      member.parent = null;
+      return true;
+    }
+  }
+  return false;
+}
+
+function LuaTable::get(name) {
+  for( _, member in ipairs(this.members) ) {
+    if( member.name == name ) {
+      return member;
+    }
+  }
+  if( this.inherits_from ) {
+    return this.inherits_from->get(name);
+  }
+}
+
+function LuaTable::pairs() {
+  if( ! this.members_sorted ) {
+    table.sort(this.members, function(m1, m2) {
+      return m1.name < m2.name;
+    });
+    this.members_sorted = true;
+  }
+  var n = 0;
+  var inh = this.inherits_from && this.inherits_from->pairs();
+  var inh_name, inh_val;
+  if( inh ) {
+    inh_name, inh_val = inh();
+  }
+  return function() {
+    var oldn = n;
+    do {
+      ++n    ;
+      var member = this.members[n];
+      if( member && member.name ) {
+        if( inh_name ) {
+          if( inh_name < member.name ) {
+            n = oldn;
+            var n, v = inh_name, inh_val;
+            inh_name, inh_val = inh();
+            return n, v;
+          } else if( inh_name > member.name ) {
+            return member.name, member;
+          } else {
+            inh_name, inh_val = inh();
+            return member.name, member;
+          }
+        } else {
+          return member.name, member;
+        }
+      }
+    } while(!( ! member) );
+    if( inh_name ) {
+      n = oldn;
+      var n, v = inh_name, inh_val;
+      inh_name, inh_val = inh();
+      return n, v;
+    }
+  };
+}
+
+function LuaClass::LuaClass() {
+  this->LuaTable();
+  this.super_class = null;
+  this.subclasses = {};
+  this.subclasses_sorted = false;
+}
+
+function LuaClass::setSuperClass(super) {
+  if( type(super) == "string" ) {
+    assert(this.super_class == null);
+    this.super_class = super;
+  } else {
+    assert(this.super_class == null || type(this.super_class) == "string");
+    this.super_class = super;
+    this->inheritFrom(super);
+    super.subclasses[#super.subclasses + 1] = this;
+    super.subclasses_sorted = false;
+  }
+  return this;
+}
+
+function LuaClass::getSuperClass() {
+  return this.super_class;
+}
+
+function LuaClass::hasSubclasses() {
+  return this.subclasses[1] != null;
+}
+
+function LuaClass::subclassPairs() {
+  if( ! this.subclasses_sorted ) {
+    table.sort(this.subclasses, function(m1, m2) {
+      return m1.name < m2.name;
+    });
+    this.subclasses_sorted = true;
+  }
+  var n = 0;
+  return function() {
+    do {
+      ++n    ;
+      var member = this.subclasses[n];
+      if( member && member.name ) {
+        return member.name, member;
+      }
+    } while(!( ! member) );
+  };
+}
+
+function LuaFile::LuaFile() {
+  this->LuaNode();
+}
+
+function LuaDirectory::LuaDirectory() {
+  this->LuaNode();
+  this.children = {};
+  this.children_sorted = true;
+}
+
+function LuaDirectory::getId() {
+  var id;
+  if( this.name ) {
+    id = this.name->gsub("_","__")->gsub("[A-Z]", function(c) { return "_" .. c->lower(); });
+  } else {
+    id = "_2";
+  }
+  if( this.parent ) {
+    id = this.parent->getId() .."_1".. id;
+  }
+  return id;
+}
+
+function LuaFile::getId() {
+  var id = this.name->gsub("_","__")->gsub("[A-Z]", function(c) { return "_" .. c->lower(); });
+  id = this.parent->getId() .."_1".. id;
+  return id;
+}
+
+function LuaDirectory::get(name) {
+  for( _, member in ipairs(this.children) ) {
+    if( member.name == name ) {
+      return member;
+    }
+  }
+}
+
+function LuaDirectory::addMember(child) {
+  this.children[#this.children + 1] = child;
+  this.children_sorted = false;
+  return this;
+}
+
+function LuaDirectory::setParent(parent) {
+  assert(this.parent == null);
+  if( class.is(parent, LuaDirectory) ) {
+    parent->addMember(this);
+  } else {
+    error ("Unknown parent type");
+  }
+  this.parent = parent;
+  return this;
+}
+
+function LuaDirectory::pairs() {
+  if( ! this.children_sorted ) {
+    table.sort(this.children, function(m1, m2) {
+      return m1.name < m2.name;
+    });
+    this.children_sorted = true;
+  }
+  var n = 0;
+  return function() {
+    do {
+      ++n    ;
+      var member = this.children[n];
+      if( member && member.name ) {
+        return member.name, member;
+      }
+    } while(!( ! member) );
+  };
+}
+
+function LuaFile::setParent(parent) {
+  assert(this.parent == null);
+  if( class.is(parent, LuaDirectory) ) {
+    parent->addMember(this);
+  } else {
+    error ("Unknown parent type");
+  }
+  this.parent = parent;
+  return this;
+}

@@ -1,0 +1,136 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Base class for 640x480px dialogs (fullscreen in original game resolution).
+class ("UIFullscreen") (Window);
+
+//-@type UIFullscreen
+var UIFullscreen = _G["UIFullscreen"];
+
+function UIFullscreen::UIFullscreen(ui) {
+  this->Window();
+
+  this.esc_closes = true;
+  this.ui = ui;
+  this.modal_class = "fullscreen";
+
+  this.width = 640;
+  this.height = 480;
+
+  this->onChangeResolution();
+}
+
+// Cause all fullscreen windows to share a common saved window position.
+function UIFullscreen::getSavedWindowPositionName() {
+  return "UIFullscreen";
+}
+
+function UIFullscreen::onChangeResolution() {
+  var app = this.ui.app;
+  if( app.config.width > this.width || app.config.height > this.height ) {
+    if( ! this.border_sprites ) {
+      this.border_sprites = app.gfx->loadSpriteTable("Bitmap", "aux_ui", true);
+    }
+  } else {
+    this.border_sprites = null;
+  }
+  // not draggable in actual fullscreen mode
+  this.draggable = ! ! this.border_sprites;
+
+  var config = this.ui.app.runtime_config.window_position;
+  if( config ) {
+    config = config[this->getSavedWindowPositionName()];
+    if( config && config.x && config.y ) {
+      return this->setPosition(config.x, config.y);
+    }
+  }
+
+  this.x = math.floor((app.config.width - this.width) / 2);
+
+  // NB: Bottom panel is 48 pixels high
+  if( app.config.height > 480 + 48 ) {
+    this.y = math.floor((app.config.height - 48 - this.height) / 2);
+  } else if( app.config.height >= 480 ) {
+    this.y = 0;
+  } else {
+    this.y = math.floor((app.config.height - this.height) / 2);
+  }
+}
+
+function UIFullscreen::draw(canvas, x, y) {
+  var sprites = this.border_sprites;
+  if( sprites ) {
+    var draw = sprites.draw;
+    var scr_x = this.x + x;
+    var scr_y = this.y + y;
+    canvas->nonOverlapping(true);
+    draw(sprites, canvas, 10, scr_x - 9, scr_y - 9);
+    draw(sprites, canvas, 12, scr_x + 600, scr_y - 9);
+    draw(sprites, canvas, 15, scr_x - 9, scr_y + 440);
+    draw(sprites, canvas, 17, scr_x + 600, scr_y + 440);
+    for( loop_x = scr_x + 40, scr_x + 560, 40 ) {
+      draw(sprites, canvas, 11, loop_x, scr_y - 9);
+      draw(sprites, canvas, 16, loop_x, scr_y + 480);
+    }
+    for( loop_y = scr_y + 40, scr_y + 400, 40 ) {
+      draw(sprites, canvas, 13, scr_x - 9, loop_y);
+      draw(sprites, canvas, 14, scr_x + 640, loop_y);
+    }
+    canvas->nonOverlapping(false);
+  }
+  return Window.draw(this, canvas, x, y);
+}
+
+function UIFullscreen::onMouseDown(button, x, y) {
+  var repaint = Window.onMouseDown(this, button, x, y);
+  if( button == "left" && ! repaint && ! (x >= 0 && y >= 0 &&
+      x < this.width && y < this.height) && this->hitTest(x, y) ) {
+    return this->beginDrag(x, y);
+  }
+  return repaint;
+}
+
+function UIFullscreen::hitTest(x, y) {
+  if( x >= 0 && y >= 0 && x < this.width && y < this.height ) {
+    return true;
+  }
+  var sprites = this.border_sprites;
+  if( ! sprites ) {
+    return false;
+  }
+  if( x < -9 || y < -9 || x >= this.width + 9 || y >= this.height + 9 ) {
+    return false;
+  }
+  if( (0 <= x && x < this.width) || (0 <= y && y < this.height) ) {
+    return true;
+  }
+
+  return sprites.hitTest(sprites, 10, x + 9,   y + 9) ||
+         sprites.hitTest(sprites, 12, x - 600, y + 9) ||
+         sprites.hitTest(sprites, 15, x + 9,   y - 440) ||
+         sprites.hitTest(sprites, 17, x - 600, y - 440);
+}
+
+function UIFullscreen::afterLoad(old, new) {
+  Window.afterLoad(this, old, new);
+  if( old < 22 ) {
+    this.draggable = ! ! this.border_sprites;
+  }
+}

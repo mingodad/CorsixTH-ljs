@@ -1,0 +1,101 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var room = {};
+room.id = "pharmacy";
+room.level_config_id = 11;
+room.class = "PharmacyRoom";
+room.name = _S.rooms_short.pharmacy;
+room.long_name = _S.rooms_long.pharmacy;
+room.tooltip = _S.tooltip.rooms.pharmacy;
+room.objects_additional = { "extinguisher", "radiator", "plant", "bin" };
+room.objects_needed = { pharmacy_cabinet = 1 };
+room.build_preview_animation = 5088;
+room.categories = {
+  treatment = 4,
+};
+room.minimum_size = 4;
+room.wall_type = "white";
+room.floor_tile = 19;
+room.required_staff = {
+  Nurse = 1,
+};
+room.maximum_staff = room.required_staff;
+room.call_sound = "reqd012.wav";
+
+class ("PharmacyRoom") (Room);
+
+//-@type PharmacyRoom
+var PharmacyRoom = _G["PharmacyRoom"];
+
+function PharmacyRoom::PharmacyRoom(...) {
+  this->Room(...);
+}
+
+function PharmacyRoom::roomFinished() {
+  if( ! this.hospital->hasStaffOfCategory("Nurse") ) {
+    this.world.ui.adviser->say(_A.room_requirements.pharmacy_need_nurse);
+  }
+  return Room.roomFinished(this);
+}
+
+function PharmacyRoom::commandEnteringPatient(patient) {
+  var staff = this.staff_member;
+  var cabinet, stf_x, stf_y = this.world->findObjectNear(patient, "pharmacy_cabinet");
+  var pat_x, pat_y;
+  var orientation = cabinet.object_type.orientations[cabinet.direction];
+  pat_x = stf_x - orientation.use_position[1] + orientation.use_position_secondary[1];
+  pat_y = stf_y - orientation.use_position[2] + orientation.use_position_secondary[2];
+
+  var layer3;
+  var patient_class = patient.humanoid_class;
+  if( patient_class == "Standard Female Patient" || patient_class == "Transparent Female Patient" ) {
+    // Female patients cannot use flask colour 2, as in their idle animation,
+    // layer 3 item 2 is a bandage.
+    layer3 = math.random(0, 1) * 4;
+  } else {
+    layer3 = math.random(0, 2) * 2;
+  }
+
+  patient->setNextAction(WalkAction(pat_x, pat_y));
+  patient->queueAction(IdleAction()->setDirection(cabinet.direction == "north" && "east" || "south"));
+
+  staff->setNextAction(WalkAction(stf_x, stf_y));
+
+  var after_use_pharmacy = /*persistable:pharmacy_after_use*/ function() {
+    //if we haven't tried to edit the room while she's animating, meander
+    if( #staff.action_queue == 1 ) {
+      staff->setNextAction(MeanderAction());
+    }
+    if( patient_class == "Invisible Patient" || patient_class == "Transparent Male Patient" ) {
+      patient->setType ("Standard Male Patient");
+    } else if( patient_class == "Transparent Female Patient" ) {
+      patient->setType ("Standard Female Patient");
+    }
+    this->dealtWithPatient(patient);
+  };
+
+  staff->queueAction(MultiUseObjectAction(cabinet, patient)->setAfterUse(after_use_pharmacy)
+      ->setLayer3(layer3));
+
+  return Room.commandEnteringPatient(this, patient);
+}
+
+return room;

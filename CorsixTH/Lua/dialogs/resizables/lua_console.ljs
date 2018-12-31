@@ -1,0 +1,142 @@
+/* Copyright (c) 2010 Manuel "Roujin" Wolf
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+strict_declare_global ("_");
+_ = null;
+
+//! Interactive Lua Console for ingame debugging.
+class ("UILuaConsole") (UIResizable);
+
+//-@type UILuaConsole
+var UILuaConsole = _G["UILuaConsole"];
+
+var col_bg = {
+  red = 46,
+  green = 186,
+  blue = 60,
+};
+
+var col_textbox = {
+  red = 0,
+  green = 0,
+  blue = 0,
+};
+
+var col_highlight = {
+  red = 174,
+  green = 166,
+  blue = 218,
+};
+
+var col_shadow = {
+  red = 134,
+  green = 126,
+  blue = 178,
+};
+
+function UILuaConsole::UILuaConsole(ui) {
+  this->UIResizable(ui, 320, 240, col_bg);
+
+  var app = ui.app;
+  this.modal_class = "console";
+  this.esc_closes = true;
+  this.resizable = true;
+  this.min_width = 200;
+  this.min_height = 150;
+  this->setDefaultPosition(0.1, 0.1);
+
+  // Window parts definition
+  this.default_button_sound = "selectx.wav";
+
+  // Textbox for entering code
+  this.textbox = this->addBevelPanel(20, 20, 280, 140, col_textbox, col_highlight, col_shadow)
+    ->setLabel("", app.gfx->loadBuiltinFont(), "left")->setTooltip(_S.tooltip.lua_console.textbox)->setAutoClip(true)
+    ->makeTextbox()->allowedInput("all")->setText({""});
+
+  this.textbox->setActive(true); // activated by default
+
+  // "Execute" button
+  this.execute_button = this->addBevelPanel(20, this.height - 60, 130, 40, col_bg)->setLabel(_S.lua_console.execute_code)
+    ->makeButton(0, 0, 130, 40, null, this.buttonExecute)->setTooltip(_S.tooltip.lua_console.execute_code);
+  // "Close" button
+  this.close_button = this->addBevelPanel(170, this.height - 60, 130, 40, col_bg)->setLabel(_S.lua_console.close)
+    ->makeButton(0, 0, 130, 40, null, this.buttonClose)->setTooltip(_S.tooltip.lua_console.close);
+}
+
+function UILuaConsole::setSize(width, height) {
+  UIResizable.setSize(this, width, height);
+
+  this.textbox->setSize(this.width - 40, this.height - 100);
+
+  var button_width = math.floor((this.width - 60) / 2);
+
+  this.execute_button->setPosition(20, this.height - 60);
+  this.execute_button->setSize(button_width, 40);
+
+  this.close_button->setPosition(this.width - 20 - button_width, this.height - 60);
+  this.close_button->setSize(button_width, 40);
+}
+
+function UILuaConsole::buttonExecute() {
+  print("Loading UserFunction...");
+  var func, err, s;
+
+  _ = TheApp.ui && TheApp.ui.debug_cursor_entity;
+
+  var i = 0;
+  func, err = load(function() {
+    ++i    ;
+    if( type(this.textbox.text) == "table" ) {
+      return this.textbox.text[i] && this.textbox.text[i] .. "\n";
+    } else {
+      return i < 2 && this.textbox.text;
+    }
+  }, "=UserFunction");
+
+  if( ! func ) {
+    print("Error while loading UserFunction:");
+    print(err);
+    return;
+  }
+
+  print("Executing UserFunction...");
+  s, err = pcall(func);
+  if( ! s ) {
+    print("Error while executing UserFunction:");
+    print(err);
+  }
+}
+
+function UILuaConsole::buttonClose() {
+  this->close();
+}
+
+function UILuaConsole::afterLoad(old, new) {
+  UIResizable.afterLoad(this, old, new);
+  if( old < 65 ) {
+    // added min_width and min_height
+    this.min_width = 200;
+    this.min_height = 150;
+    // added execute_button, close_button, changed callback
+    this.execute_button = this.buttons[2];
+    this.close_button = this.buttons[3];
+    this.close_button.on_click = this.buttonClose;
+  }
+}

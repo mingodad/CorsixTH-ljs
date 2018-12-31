@@ -1,0 +1,245 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("StaffProfile");
+
+//-@type StaffProfile
+var StaffProfile = _G["StaffProfile"];
+
+function StaffProfile::StaffProfile(world, humanoid_class, local_string) {
+  this.world = world;
+  this.humanoid_class = humanoid_class;
+  this.name = "U. N. Initialised";
+  this.wage = 0;
+  this.skill = 0; // [0.0, 1.0]
+  this.layer5 = 2;
+  this.attention_to_detail = math.random();
+  this.profession = local_string;
+}
+
+function StaffProfile::setDoctorAbilities(psychiatrist, surgeon, researcher, junior, consultant) {
+  this.is_psychiatrist = psychiatrist;
+  this.is_surgeon = surgeon;
+  this.is_researcher = researcher;
+  this.is_junior = junior;
+  this.is_consultant = consultant;
+}
+
+function StaffProfile::initDoctor(psychiatrist, surgeon, researcher, junior, consultant, skill) {
+  this->setDoctorAbilities(psychiatrist, surgeon, researcher, junior, consultant);
+  this->init(skill);
+}
+
+function StaffProfile::init(skill) {
+  this->setSkill(skill);
+  this.wage = this->getFairWage();
+  this->randomiseOrganical();
+}
+
+function StaffProfile::setSkill(skill) {
+  this.skill = skill;
+  this->parseSkillLevel();
+}
+
+var name_parts = {_S.humanoid_name_starts, _S.humanoid_name_ends};
+
+var function shuffle(t) {
+  var r = {};
+  var i = {};
+  for( k in ipairs(t) ) {
+    r[k] = math.random();
+    i[k] = k;
+  }
+  table.sort(i, function(x, y) { return r[x] < r[y]; });
+  for( k in ipairs(t) ) {
+    r[k] = t[i[k]];
+  }
+  return r;
+}
+
+var function our_concat(t) {
+  // The standard table.concat function doesn't like our userdata strings :(
+  var result = "";
+  for( _, s in ipairs(t) ) {
+    result = result .. s;
+  }
+  return result;
+}
+
+function StaffProfile::randomise(month) {
+  var level_config = this.world.map.level_config;
+
+  // decide general skill for all staff
+  this.skill = math.random();
+  //self.skill_level_modifier = math.random(-50, 50) / 1000 -- [-0.05, +0.05]
+
+  if( this.humanoid_class == "Doctor" ) {
+    // find the correct config line (based on month) for generation of the doctor
+    var i = 0;
+    while( i < #level_config.staff_levels &&
+    level_config.staff_levels[i+1].Month <= month ) {
+      ++i  ;
+    }
+
+    // list of level_config values and the corresponding staff modifiers, plus the value set for "no"
+    var mods = {
+      {"ShrkRate", "is_psychiatrist", 0},
+      {"SurgRate", "is_surgeon",      0},
+      {"RschRate", "is_researcher",   0},
+      {"JrRate",   "is_junior",     null},
+      {"ConsRate", "is_consultant", null},
+    };
+
+    // The following assumes ascending month order of the staff_levels table.
+    // TODO don't assume this but sort when loading map config
+    for( _, m in ipairs(mods) ) {
+      var rate;
+      var ind = i;
+      while( ! rate ) {
+        assert(ind >= 0, "Staff modifier " .. m[1] .. " not existent (should at least be given by base_config).");
+        rate = level_config.staff_levels[ind][m[1]];
+        --ind    ;
+      }
+      // 0 means none. Other values x mean "one in x"; thus 1 means "one in one" aka "all"
+      rate = (rate == 0) && 0 || 1 / rate;
+      this[m[2]] = math.random() < rate && 1.0 || m[3];
+    }
+
+    // is_consultant is forced to nil if is_junior is already 1
+    this.is_consultant = ! this.is_junior && this.is_consultant || null;
+
+    var jr_limit = level_config.gbv.DoctorThreshold / 1000;
+    var cons_limit = level_config.gbv.ConsultantThreshold / 1000;
+
+    // put the doctor in the right skill level box
+    if( this.is_junior ) {
+      this.skill = jr_limit * this.skill;
+    } else if( this.is_consultant ) {
+      this.skill = cons_limit + ((1 - cons_limit) * this.skill);
+    } else {
+      this.skill = jr_limit + ((cons_limit - jr_limit) * this.skill);
+    }
+  }
+  this.wage = this->getFairWage();
+  this->parseSkillLevel();
+  this->randomiseOrganical();
+}
+
+function StaffProfile::randomiseOrganical() {
+  // TODO: Randomise a letter from the current language's alphabet.
+  this.name = ""; // string.char(string.byte"A" + math.random(0, 25)) .. ". "
+  for( _, part_table in ipairs(name_parts) ) {
+    this.name = this.name .. part_table.__random;
+  }
+  var desc_table1, desc_table2;
+  if( this.skill < 0.55 ) {
+    desc_table1 = _S.staff_descriptions.bad;
+    desc_table2 = _S.staff_descriptions.misc;
+  } else {
+    desc_table1 = _S.staff_descriptions.good;
+    desc_table2 = _S.staff_descriptions.misc;
+  }
+  var descs = {desc_table1.__random,
+                 desc_table2.__random};
+  while( #our_concat(descs) > 96 ) {
+    descs[#descs] = null;
+  }
+  this.desc = our_concat(shuffle(descs));
+  if( this.humanoid_class == "Doctor" ) {
+    this.is_black = math.random(0, 1) == 0;
+    if( this.is_black ) {
+      this.hair_index = math.random(5, 9);
+      this.face_index = math.random(5, 9);
+      this.chin_index = math.random(5, 9);
+      this.layer5 = 4;
+    } else {
+      this.hair_index = math.random(0, 4);
+      this.face_index = math.random(0, 4);
+      this.chin_index = math.random(0, 4);
+      this.layer5 = 2;
+    }
+  } else if( this.humanoid_class == "Nurse" ) {
+    this.hair_index = math.random(10, 12);
+    this.face_index = math.random(10, 12);
+    this.chin_index = math.random(10, 12);
+  } else if( this.humanoid_class == "Receptionist" ) {
+    this.hair_index = math.random(13, 14);
+    this.face_index = math.random(13, 14);
+    this.chin_index = math.random(13, 14);
+  } else if( this.humanoid_class == "Handyman" ) {
+    this.hair_index = math.random(15, 17);
+    this.face_index = math.random(15, 17);
+    this.chin_index = math.random(15, 17);
+  }
+}
+
+function StaffProfile::drawFace(canvas, x, y, parts_bitmap) {
+  parts_bitmap->draw(canvas, x, y     , 0,       this.hair_index * 29, 65, 29);
+  parts_bitmap->draw(canvas, x, y + 29, 0, 522 + this.face_index * 24, 65, 24);
+  parts_bitmap->draw(canvas, x, y + 53, 0, 954 + this.chin_index * 22, 65, 22);
+}
+
+// Update junior and consultant status
+function StaffProfile::parseSkillLevel() {
+  var level_config = this.world.map.level_config;
+
+  var junior_skill = level_config.gbv.DoctorThreshold / 1000;
+  this.is_junior = this.skill <= junior_skill && 1 || null;
+
+  var consultant_skill = level_config.gbv.ConsultantThreshold / 1000;
+  this.is_consultant = this.skill >= consultant_skill && 1 || null;
+}
+
+var conf_id = {
+  Nurse = 0,
+  Doctor = 1,
+  Handyman = 2,
+  Receptionist = 3,
+};
+
+var ability_conf_id = {
+  is_junior       = 3,
+  is_doctor       = 4,
+  is_surgeon      = 5,
+  is_psychiatrist = 6,
+  is_consultant   = 7,
+  is_researcher   = 8,
+};
+
+function StaffProfile::getFairWage() {
+  if( this.world.free_build_mode ) {
+    return 0;
+  }
+
+  var level_config = this.world.map.level_config;
+  var wage = level_config.staff[conf_id[this.humanoid_class]].MinSalary;
+  wage = wage + this.skill * 1000 / level_config.gbv.SalaryAbilityDivisor;
+  if( this.humanoid_class == "Doctor" ) {
+    for( name, id in pairs(ability_conf_id) ) {
+      if( this[name] == 1 ) {
+        wage = wage + level_config.gbv.SalaryAdd[id];
+      }
+    }
+    if( ! this.is_junior && ! this.is_consultant ) {
+      wage = wage + level_config.gbv.SalaryAdd[ability_conf_id.is_doctor];
+    }
+  }
+  return math.max(math.floor(wage), level_config.staff[conf_id[this.humanoid_class]].MinSalary);
+}

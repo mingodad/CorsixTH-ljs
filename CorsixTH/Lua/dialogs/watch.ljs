@@ -1,0 +1,176 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Timer / clock / watch / countdown dialog for emergencies / level start
+//! The timer lasts approximately 100 days, split into 13 segments
+class ("UIWatch") (Window);
+
+//-@type UIWatch
+var UIWatch = _G["UIWatch"];
+
+//!param count_type (string) One of: "open_countdown" or "emergency" or "epidemic"
+function UIWatch::UIWatch(ui, count_type) {
+  this->Window();
+
+  var app = ui.app;
+
+  this.esc_closes = false;
+  this.modal_class = "open_countdown";
+  this.tick_rate = math.floor((100 * Date.hoursPerDay()) / 13);
+  this.tick_timer = this.tick_rate;  // Initialize tick timer
+  this.open_timer = 12;
+  this.ui = ui;
+  this.hospital = ui.hospital;
+  this.width = 39;
+  this.height = 79;
+  this->setDefaultPosition(20, -100);
+  this.panel_sprites = app.gfx->loadSpriteTable("Data", "Watch01V", true);
+  this.epidemic = false;
+  this.count_type = count_type;
+  // For cycling the list of epidemic/emergency patients which index to use
+  this.current_index = null;
+  // The last patient whose dialog was opened by clicking the timer
+  this.lastCycledPatient = null;
+
+  var end_sprite = (count_type == "epidemic") && 14 || 16;
+
+  var tooltips = {
+    ["initial_opening"] = _S.tooltip.watch.hospital_opening,
+    ["emergency"]       = _S.tooltip.watch.emergency,
+    ["epidemic"]        = _S.tooltip.watch.epidemic,
+  };
+
+  if( count_type == "epidemic" ) {
+    this.end_button = this->addPanel(end_sprite, 4, 0)
+    ->makeButton(4, 0, 27, 28, end_sprite + 1, this.toggleVaccinationMode)
+    ->setTooltip(tooltips[count_type]);
+  } else if( count_type != "emergency" ) {
+    this.end_button = this->addPanel(end_sprite, 4, 0)
+      ->makeButton(4, 0, 27, 28, end_sprite + 1, this.onCountdownEnd)
+      ->setTooltip(tooltips[count_type]);
+  }
+
+  var timer_sprite = 13;
+  if( count_type == "epidemic" || count_type == "emergency" ) {
+    this->addPanel(timer_sprite, 0, 28)
+      ->setTooltip(tooltips[count_type])
+      ->makeButton(timer_sprite, 0, 25, 50, timer_sprite,
+        this.scrollToTimerEventPatient, null, this.cycleTimerEventPatient);
+  } else {
+    this->addPanel(timer_sprite, 0, 28)->setTooltip(tooltips[count_type]);
+  }
+  this->addPanel(1, 2, 47);
+}
+
+function UIWatch::onCountdownEnd() {
+  this->close();
+  if( this.count_type == "emergency" ) {
+    this.ui.hospital->resolveEmergency();
+  } else if( this.count_type == "epidemic" ) {
+    var epidemic = this.hospital.epidemic;
+    if( epidemic && ! epidemic.inspector ) {
+      epidemic->spawnInspector();
+      if( epidemic.vaccination_mode_active ) {
+        epidemic->toggleVaccinationMode();
+      }
+    }
+  } else if( this.count_type == "initial_opening" ) {
+    this.ui.hospital.opened = true;
+    this.ui.hospital.boiler_can_break = true; // boiler can't break whilst build timer is open
+    this.ui->playSound("fanfare.wav");
+  }
+}
+
+function UIWatch::onWorldTick() {
+  if( this.tick_timer == 0 && this.open_timer >= 0 ) { // Used for making a smooth animation
+    this.tick_timer = this.tick_rate;
+    this.open_timer = this.open_timer - 1;
+    if( this.open_timer == 11 ) {
+      this->addPanel(2, 2, 47);
+    } else if( this.open_timer == 0 ) {
+      this.panels[#this.panels].sprite_index = 0;
+    } else if( this.open_timer < 11 && this.open_timer > 0 ) {
+      this.panels[#this.panels].sprite_index = 13 - this.open_timer;
+      if( this.open_timer == 5 ) {
+        table.remove(this.panels, #this.panels - 1);
+      }
+    }
+  } else if( this.open_timer == -1 ) { // the timer is at 0 when it is completely red.
+    this->onCountdownEnd(); // Countdown terminated, so we open the hospital or ends the epidemic panic
+  } else {
+    this.tick_timer = this.tick_timer - 1;
+  }
+}
+
+/*! Toggles vaccination mode by toggling the button then
+toggling the mode in the current epidemic.*/
+function UIWatch::toggleVaccinationMode() {
+  var epidemic = this.hospital.epidemic;
+  this.end_button->toggle();
+  epidemic->toggleVaccinationMode();
+}
+
+/*! During an emergency - Cycles through the patient dialogs of all the emergency patients
+    ! During an epidemic - Cycles to the first patient who is infected but not vaccinated*/
+function UIWatch::cycleTimerEventPatient() {
+  this.ui->playSound("camclick.wav");
+  var hospital = this.ui.hospital;
+
+  if( this.count_type == "emergency" ) {
+    var patients = hospital.emergency_patients;
+
+    if( #patients > 0 ) {
+      if( ! this.current_index || this.current_index == #patients ) {
+        this.current_index = 1;
+      } else {
+        this.current_index = this.current_index + 1;
+      }
+      this.lastCycledPatient = patients[this.current_index];
+      this.ui->addWindow(UIPatient(this.ui, this.lastCycledPatient));
+    }
+  } else {
+    for( _, infected_patient in ipairs(hospital.epidemic.infected_patients) ) {
+      if( ! infected_patient.vaccinated && ! infected_patient.cured ) {
+        this.lastCycledPatient = infected_patient;
+        this.ui->addWindow(UIPatient(this.ui, this.lastCycledPatient));
+        break;
+      }
+    }
+  }
+}
+
+/*! While cycling through timer event patients (@see
+  UIWatch:cycleTimerEventPatient) scrolls the screen to centre on the selected patient
+  If a patient dialog is open that does not belong to the timer event, does nothing*/
+function UIWatch::scrollToTimerEventPatient() {
+  this.ui->playSound("camclick.wav");
+  var patient = this.lastCycledPatient;
+  if( patient ) {
+    // Current open dialog
+    var current_patient_dialog = this.ui->getWindow(UIPatient);
+    if( ! current_patient_dialog ) {
+      // Create the dialog but don't add it to the window
+      var patient_dialog = UIPatient(this.ui, patient);
+      patient_dialog->scrollToPatient();
+    } else if( patient == current_patient_dialog.patient ) {
+      current_patient_dialog->scrollToPatient();
+    }
+  }
+}

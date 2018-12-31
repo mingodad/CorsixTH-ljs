@@ -1,0 +1,402 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("MultiUseObjectAction") (HumanoidAction);
+
+//-@type MultiUseObjectAction
+var MultiUseObjectAction = _G["MultiUseObjectAction"];
+
+//! Construct a multi-use object action.
+//!param object (Object) Object being used.
+//!param use_with (Humanoid) Fellow user of the object.
+function MultiUseObjectAction::MultiUseObjectAction(object, use_with) {
+  assert(class.is(object, Object), "Invalid value for parameter 'object'");
+  assert(class.is(use_with, Humanoid), "Invalid value for parameter 'use_with'");
+
+  this->HumanoidAction("multi_use_object");
+  this.object = object;
+  this.use_with = use_with;
+  this.prolonged_usage = null; // If true, the usage is prolonged.
+  this.layer3 = null;
+}
+
+//! Set the invisibility span.
+//!param span (array) Span of invisibility, {from, to}
+//!return (action) self, for daisy-chaining.
+function MultiUseObjectAction::setInvisiblePhaseSpan(span) {
+  assert(type(span) == "table" && type(span[1]) == "number" &&
+      type(span[2] == "number") && span[1] <= span[2],
+      "Invalid value for parameter 'span'");
+
+  this.invisible_phase_span = span;
+  return this;
+}
+
+//! Set prolonged usage of the object.
+//!param prolonged (bool) If set, enable prolonged usage of the object.
+//!return (action) self, for daisy-chaining.
+function MultiUseObjectAction::setProlongedUsage(prolonged) {
+  assert(type(prolonged), "boolean", "Invalid value for parameter 'prolonged'");
+
+  this.prolonged_usage = prolonged;
+  return this;
+}
+
+// Set animation layer3 to the given value.
+//!param layer3 (int) Value to set for animation layer 3.
+//!return (action) self, for daisy-chaining.
+function MultiUseObjectAction::setLayer3(layer3) {
+  assert(type(layer3) == "number", "Invalid value for parameter 'layer3'");
+
+  this.layer3 = layer3;
+  return this;
+}
+
+var TH = require("TH");
+
+var orient_mirror = {
+  north = "west",
+  west = "north",
+  east = "south",
+  south = "east",
+};
+
+var function action_multi_use_next_phase(action, phase) {
+  ++phase    ;
+  if( phase < -5 ) {
+    phase = -5;
+  }
+  if( phase == -5 && ! action.anims.begin_use ) {
+    ++phase    ;
+  }
+  if( phase == -4 && ! action.anims.begin_use_2 ) {
+    ++phase    ;
+  }
+  if( phase == -3 && ! action.anims.begin_use_3 ) {
+    ++phase    ;
+  }
+  if( phase == -2 && ! action.anims.begin_use_4 ) {
+    ++phase    ;
+  }
+  if( phase == -1 && ! action.anims.begin_use_5 ) {
+    ++phase    ;
+  }
+  if( phase == 0 && ! action.anims.in_use ) {
+    ++phase    ;
+  }
+  if( phase == 1 && ! action.anims.finish_use ) {
+    ++phase    ;
+  }
+  if( phase == 2 && ! action.anims.finish_use_2 ) {
+    ++phase    ;
+  }
+  if( phase == 3 && ! action.anims.finish_use_3 ) {
+    ++phase    ;
+  }
+  if( phase == 4 && ! action.anims.finish_use_4 ) {
+    ++phase    ;
+  }
+  if( phase == 5 && ! action.anims.finish_use_5 ) {
+    ++phase    ;
+  }
+  if( phase > 5 ) {
+    phase = 100;
+  }
+  return phase;
+}
+
+var action_multi_use_object_tick;
+
+var function action_multi_use_phase(action, humanoid, phase) {
+  var object = action.object;
+  humanoid.user_of = null; // Temporary to avoid tile change warning
+  action.phase = phase;
+  var anim_name = "in_use";
+  if( phase == -5 ) {
+    anim_name = "begin_use";
+  } else if( phase == -4 ) {
+    anim_name = "begin_use_2";
+  } else if( phase == -3 ) {
+    anim_name = "begin_use_3";
+  } else if( phase == -2 ) {
+    anim_name = "begin_use_4";
+  } else if( phase == -1 ) {
+    anim_name = "begin_use_5";
+  } else if( phase == 1 ) {
+    anim_name = "finish_use";
+  } else if( phase == 2 ) {
+    anim_name = "finish_use_2";
+  } else if( phase == 3 ) {
+    anim_name = "finish_use_3";
+  } else if( phase == 4 ) {
+    anim_name = "finish_use_4";
+  } else if( phase == 5 ) {
+    anim_name = "finish_use_5";
+  }
+  var anim = action.anims[anim_name];
+  if( type(anim) == "table" ) {
+    // If an animation list is provided rather than a single animation, then
+    // choose an animation from the list at random, or according to the previous
+    // phase. Look at general diagnosis for usage example.
+    if( action.random_anim ) {
+      anim = anim[action.random_anim];
+    } else {
+      action.random_anim = math.random(1, #anim);
+      anim = anim[action.random_anim];
+    }
+  }
+  if( object.split_anims ) {
+    var anims = humanoid.world.anims;
+    for( i = 2, #object.split_anims ) {
+      var th = object.split_anims[i];
+      th->setAnimation(anims, anim, action.mirror_flags);
+    }
+  }
+  humanoid->setAnimation(anim, action.mirror_flags);
+
+  var offset = object.object_type.orientations;
+  if( offset ) {
+    var tx, ty;
+    offset = offset[object.direction];
+    if( offset.use_animate_from_use_position ) {
+      tx, ty = object.tile_x + offset.use_position[1], object.tile_y + offset.use_position[2];
+    } else {
+      tx, ty = object->getRenderAttachTile();
+    }
+    offset = offset.animation_offset;
+    humanoid->setTilePositionSpeed(tx, ty, offset[1], offset[2]);
+  } else {
+    humanoid->setTilePositionSpeed(object.tile_x, object.tile_y, 0, 0);
+  }
+
+  humanoid.user_of = object;
+  var length = humanoid.world->getAnimLength(anim);
+  var secondary_anim = action.anims.secondary && action.anims.secondary[anim_name];
+  if( action.secondary_anim ) {
+    secondary_anim = action.secondary_anim;
+    action.secondary_anim = null;
+  }
+  var use_with = action.use_with;
+  if( secondary_anim ) {
+    if( type(secondary_anim) == "table" && secondary_anim[1] == "morph" ) {
+      use_with->setAnimation(secondary_anim[2], action.mirror_flags);
+      var morph_target = TH.animation();
+      morph_target->setAnimation(use_with.world.anims, secondary_anim[3], action.mirror_flags);
+      for( layer, id in pairs(use_with.layers) ) {
+        morph_target->setLayer(layer, id);
+      }
+      if( secondary_anim.layers ) {
+        for( layer, id in pairs(use_with[secondary_anim.layers]) ) {
+          morph_target->setLayer(layer, id);
+        }
+        action.change_secondary_layers = use_with[secondary_anim.layers];
+      }
+      use_with.th->setMorph(morph_target);
+      secondary_anim = secondary_anim[3];
+    } else {
+      use_with->setAnimation(secondary_anim, action.mirror_flags);
+    }
+    use_with.th->makeVisible();
+    var secondary_length = use_with.world->getAnimLength(secondary_anim);
+    if( secondary_length > length ) {
+      length = secondary_length;
+    }
+  } else {
+    var span = action.invisible_phase_span;
+    if( span ) {
+      if( span[1] <= phase && span[2] >= phase ) {
+        use_with.th->makeInvisible();
+      } else {
+        use_with.th->makeVisible();
+      }
+    } else {
+      use_with.th->makeInvisible();
+    }
+  }
+  humanoid->setTimer(length, action_multi_use_object_tick);
+}
+
+var function copy_layers(dest, src) {
+  if( class.is(dest, Staff) ) {
+    dest->setLayer(0, src.layers[0]);
+    dest->setLayer(1, src.layers[1]);
+    dest->setLayer(2, src.layers[2]);
+    dest->setLayer(3, src.layers[3]);
+    dest->setLayer(4, src.layers[4]);
+  } else if( class.is(src, Staff) ) {
+    dest->setLayer(5, src.layers[5]);
+  }
+}
+
+action_multi_use_object_tick = permanent("action_multi_use_object_tick")( function(humanoid) {
+  var action = humanoid->getCurrentAction();
+  var use_with = action.use_with;
+  var object = action.object;
+  var phase = action.phase;
+  var oldphase = phase;
+  if( phase != 0 || ! action.prolonged_usage ) {
+    phase = action_multi_use_next_phase(action, phase);
+  } else if( action.loop_callback ) {
+    action->loop_callback();
+  }
+  if( action.change_secondary_layers ) {
+    for( layer, id in pairs(action.change_secondary_layers) ) {
+      use_with->setLayer(layer, id);
+    }
+    action.change_secondary_layers = null;
+    copy_layers(humanoid, use_with);
+  }
+  if( oldphase <= 5 && phase > 5 ) {
+    object->removeUser(humanoid);
+    humanoid.user_of = null;
+    if( object.split_anims ) {
+      var anims, anim, frame, flags = humanoid.world.anims,
+        object.th->getAnimation(), object.th->getFrame(), object.th->getFlag();
+      for( i = 2, #object.split_anims ) {
+        var th = object.split_anims[i];
+        th->setLayersFrom(object.th);
+        th->setHitTestResult(object);
+        th->setAnimation(anims, anim, flags);
+        th->setFrame(frame);
+      }
+      object.ticks = object.object_type.ticks;
+    }
+  }
+  if( phase == 0 ) {
+    // Already now move the secondary user to his final position and orientation.
+    // This is needed if some end phases have the secondary user visible (e.g. jelly moulder)
+    var spec = object.object_type.orientations[object.direction];
+    var pos = spec.finish_use_position_secondary || spec.use_position_secondary;
+    var direction = spec.finish_use_orientation_secondary;
+    use_with->setTilePositionSpeed(object.tile_x + pos[1], object.tile_y + pos[2]);
+    if( direction ) {
+      var anims = use_with.walk_anims;
+      var anim  = (direction == "north" || direction == "west") && anims.idle_north || anims.idle_east;
+      var flags = (direction == "north" || direction == "east") && 0 || 1;
+      use_with->setAnimation(anim, flags);
+    }
+  }
+  if( phase == 100 ) {
+    if( action.layer3 ) {
+      humanoid->setLayer(3, action.old_layer3_humanoid);
+      use_with->setLayer(3, action.old_layer3_use_with);
+    }
+
+    use_with.th->makeVisible();
+    use_with->getCurrentAction().on_interrupt = action.idle_interrupt;
+    use_with->getCurrentAction().must_happen = action.idle_must_happen;
+    var spec = object.object_type.orientations[object.direction];
+    var pos = spec.finish_use_position || spec.use_position;
+    humanoid->setTilePositionSpeed(object.tile_x + pos[1], object.tile_y + pos[2]);
+    // Check if the room is about to be destroyed
+    var room_destroyed = false;
+    if( object.strength ) {
+      room_destroyed = object->machineUsed(humanoid->getRoom());
+    }
+    if( ! room_destroyed ) {
+    // Now call the after_use function if appropriate
+      if( action.after_use ) {
+        action.after_use();
+      }
+      humanoid->finishAction(action);
+    }
+  } else {
+    action_multi_use_phase(action, humanoid, phase);
+  }
+});
+
+var action_multi_use_object_interrupt = permanent("action_multi_use_object_interrupt")( function(action, humanoid) {
+  if( ! action.loop_callback ) {
+    action.prolonged_usage = false;
+  }
+});
+
+var function action_multi_use_object_start(action, humanoid) {
+  var use_with = action.use_with;
+  if( action.must_happen ) {
+    // Setting must_happen is slightly dangerous (though required in some
+    // situations), as the multi-usage cannot be sure to happen until the
+    // secondary user is present (at which point, must_happen is always set).
+    if( action.todo_interrupt && ! action.no_truncate ) {
+      humanoid->finishAction(action);
+      return;
+    }
+  }
+  if( use_with->getCurrentAction().name != "idle" ) {
+    humanoid->queueAction(IdleAction()->setCount(2), 0);
+    return;
+  } else {
+    action.idle_interrupt = use_with->getCurrentAction().on_interrupt;
+    action.idle_must_happen = use_with->getCurrentAction().must_happen;
+    use_with->getCurrentAction().on_interrupt = null;
+    use_with->getCurrentAction().must_happen = true;
+  }
+  action.must_happen = true;
+  if( action.prolonged_usage ) {
+    action.on_interrupt = action_multi_use_object_interrupt;
+    use_with->getCurrentAction().on_interrupt = /*persistable:action_multi_use_object_use_with_interrupt*/ function() {
+      if( action.on_interrupt ) {
+        action->on_interrupt();
+        action.on_interrupt = null;
+      }
+    };
+  }
+  var object = action.object;
+  var orient = object.direction;
+  var flags = 0;
+  var anim_set = humanoid.humanoid_class .. " - " .. use_with.humanoid_class;
+  if( ! object.object_type.multi_usage_animations[anim_set][orient] ) {
+    orient = orient_mirror[orient];
+    ++flags    ;
+  }
+  if( object.split_anims ) {
+    flags = flags + DrawFlags.Crop;
+  }
+  var spec = object.object_type.orientations[object.direction];
+  // early_list_while_in_use (if defined) will take precedence over early_list
+  if( spec.early_list_while_in_use || (spec.early_list_while_in_use == null && spec.early_list) ) {
+    flags +=   1024;
+  }
+  var anims = object.object_type.multi_usage_animations[anim_set][orient];
+  action.anims = anims;
+  action.mirror_flags = flags;
+
+  object->setUser(humanoid);
+  humanoid.user_of = object;
+  copy_layers(humanoid, use_with);
+  if( action.layer3 ) {
+    action.old_layer3_humanoid = humanoid.layers[3];
+    action.old_layer3_use_with = use_with.layers[3];
+    humanoid->setLayer(3, action.layer3);
+    use_with->setLayer(3, action.layer3);
+  }
+  if( object.split_anims ) {
+    for( i = 2, #object.split_anims ) {
+      var th = object.split_anims[i];
+      th->setLayersFrom(humanoid.th);
+      th->setHitTestResult(humanoid);
+    }
+    object.ticks = true;
+  }
+
+  action_multi_use_phase(action, humanoid, action_multi_use_next_phase(action, -100));
+}
+
+return action_multi_use_object_start;

@@ -1,0 +1,246 @@
+/* Copyright (c) 2010 Manuel "Roujin" Wolf
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! A dialog for activating cheats
+class ("UICheats") (UIResizable);
+
+//-@type UICheats
+var UICheats = _G["UICheats"];
+
+var col_bg = {
+  red = 154,
+  green = 146,
+  blue = 198,
+};
+
+var col_caption = {
+  red = 174,
+  green = 166,
+  blue = 218,
+};
+
+var col_border = {
+  red = 134,
+  green = 126,
+  blue = 178,
+};
+
+var col_cheated_no = {
+  red = 36,
+  green = 154,
+  blue = 36,
+};
+
+var col_cheated_yes = {
+  red = 224,
+  green = 36,
+  blue = 36,
+};
+
+/* Constructs the cheat dialog.
+!param ui (UI) The active ui.
+*/
+function UICheats::UICheats(ui) {
+  this.cheats = {
+    {name = "money",          func = this.cheatMoney},
+    {name = "all_research",   func = this.cheatResearch},
+    {name = "emergency",      func = this.cheatEmergency},
+    {name = "epidemic",       func = this.cheatEpidemic},
+    {name = "toggle_infected", func = this.cheatToggleInfected},
+    {name = "vip",            func = this.cheatVip},
+    {name = "earthquake",     func = this.cheatEarthquake},
+    {name = "create_patient", func = this.cheatPatient},
+    {name = "end_month",      func = this.cheatMonth},
+    {name = "end_year",       func = this.cheatYear},
+    {name = "lose_level",     func = this.cheatLose},
+    {name = "win_level",      func = this.cheatWin},
+    {name = "increase_prices", func = this.cheatIncreasePrices},
+    {name = "decrease_prices", func = this.cheatDecreasePrices},
+  };
+
+
+  this->UIResizable(ui, 300, 200, col_bg);
+
+  this.default_button_sound = "selectx.wav";
+
+  this.modal_class = "cheats";
+  this.esc_closes = true;
+  this.resizable = false;
+  this->setDefaultPosition(0.2, 0.4);
+
+  var y = 10;
+  this->addBevelPanel(20, y, 260, 20, col_caption)->setLabel(_S.cheats_window.caption)
+    .lowered = true;
+
+  y +=   30;
+  this->addColourPanel(20, y, 260, 40, col_bg.red, col_bg.green, col_bg.blue)->setLabel({_S.cheats_window.warning});
+
+  y +=   40;
+  this.cheated_panel = this->addBevelPanel(20, y, 260, 18, col_cheated_no, col_border, col_border);
+
+  var function button_clicked(num) {
+    return /*persistable:cheats_button*/ function(window) {
+      window->buttonClicked(num);
+    };
+  }
+
+  this.item_panels = {};
+  this.item_buttons = {};
+
+  y +=   30;
+  for( num = 1, #this.cheats ) {
+    this.item_panels[num] = this->addBevelPanel(20, y, 260, 20, col_bg)
+      ->setLabel(_S.cheats_window.cheats[this.cheats[num].name]);
+    this.item_buttons[num] = this.item_panels[num]->makeButton(0, 0, 260, 20, null, button_clicked(num))
+      ->setTooltip(_S.tooltip.cheats_window.cheats[this.cheats[num].name]);
+    y +=   20;
+  }
+
+  y +=   20;
+  this->addBevelPanel(20, y, 260, 40, col_bg)->setLabel(_S.cheats_window.close)
+    ->makeButton(0, 0, 260, 40, null, this.buttonBack)->setTooltip(_S.tooltip.cheats_window.close);
+
+  y +=   60;
+  this->setSize(300, y);
+  this->updateCheatedStatus();
+}
+
+function UICheats::updateCheatedStatus() {
+  var cheated = this.ui.hospital.cheated;
+  this.cheated_panel->setLabel(cheated && _S.cheats_window.cheated.yes || _S.cheats_window.cheated.no);
+  this.cheated_panel->setColour(cheated && col_cheated_yes || col_cheated_no);
+}
+
+function UICheats::buttonClicked(num) {
+  // Only the cheats that may fail return false in that case. All others return nothing.
+  if( this.cheats[num].func(this) != false ) {
+    if( this.cheats[num].name != "lose_level" ) {
+      var announcements = this.ui.app.world.cheat_announcements;
+      if( announcements ) {
+        this.ui->playSound(announcements[math.random(1, #announcements)]);
+      }
+      this.ui.hospital.cheated = true;
+      this->updateCheatedStatus();
+    }
+  } else {
+    // It was not possible to use this cheat.
+    this.ui->addWindow(UIInformation(this.ui, {_S.information.cheat_not_possible}));
+  }
+}
+
+function UICheats::cheatMoney() {
+  this.ui.hospital->receiveMoney(10000, _S.transactions.cheat);
+}
+
+function UICheats::cheatResearch() {
+  var hosp = this.ui.hospital;
+  for( _, cat in ipairs({"diagnosis", "cure"}) ) {
+    while( hosp.research.research_policy[cat].current ) {
+      hosp.research->discoverObject(hosp.research.research_policy[cat].current);
+    }
+  }
+}
+
+function UICheats::cheatEmergency() {
+  if( ! this.ui.hospital->createEmergency() ) {
+    this.ui->addWindow(UIInformation(this.ui, {_S.misc.no_heliport}));
+  }
+}
+
+/* Creates a new contagious patient in the hospital - potentially an epidemic*/
+function UICheats::cheatEpidemic() {
+  this.ui.hospital->spawnContagiousPatient();
+}
+
+/* Before an epidemic has been revealed toggle the infected icons
+to easily distinguish the infected patients -- will toggle icons
+for ALL future epidemics you cannot distingush between epidemics
+by disease */
+function UICheats::cheatToggleInfected() {
+  var hospital = this.ui.hospital;
+  if( hospital.future_epidemics_pool && #hospital.future_epidemics_pool > 0 ) {
+    for( _, future_epidemic in ipairs(hospital.future_epidemics_pool) ) {
+      var show_mood = future_epidemic.cheat_always_show_mood;
+      future_epidemic.cheat_always_show_mood = ! show_mood;
+      var mood_action = show_mood && "deactivate" || "activate";
+      for( _, patient in ipairs(future_epidemic.infected_patients) ) {
+        patient->setMood("epidemy4",mood_action);
+      }
+    }
+  } else {
+    print("Unable to toggle icons - no epidemics in progress that are not revealed");
+  }
+}
+
+function UICheats::cheatVip() {
+  this.ui.hospital->createVip();
+}
+
+function UICheats::cheatEarthquake() {
+  return this.ui.app.world->createEarthquake();
+}
+
+function UICheats::cheatPatient() {
+  this.ui.app.world->spawnPatient();
+}
+
+function UICheats::cheatMonth() {
+  this.ui.app.world->setEndMonth();
+}
+
+function UICheats::cheatYear() {
+  this.ui.app.world->setEndYear();
+}
+
+function UICheats::cheatLose() {
+  this.ui.app.world->loseGame(1); // TODO adjust for multiplayer
+}
+
+function UICheats::cheatWin() {
+  this.ui.app.world->winGame(1); // TODO adjust for multiplayer
+}
+
+function UICheats::cheatIncreasePrices() {
+  var hosp = this.ui.app.world.hospitals[1];
+  for( _, casebook in pairs(hosp.disease_casebook) ) {
+    var new_price = casebook.price + 0.5;
+    if( new_price > 2 ) {
+      casebook.price = 2;
+    } else {
+      casebook.price = new_price;
+    }
+  }
+}
+
+function UICheats::cheatDecreasePrices() {
+  var hosp = this.ui.app.world.hospitals[1];
+  for( _, casebook in pairs(hosp.disease_casebook) ) {
+    var new_price = casebook.price - 0.5;
+    if( new_price < 0.5 ) {
+      casebook.price = 0.5;
+    } else {
+      casebook.price = new_price;
+    }
+  }
+}
+
+function UICheats::buttonBack() {
+  this->close();
+}

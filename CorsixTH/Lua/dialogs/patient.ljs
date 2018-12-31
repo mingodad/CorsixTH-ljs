@@ -1,0 +1,345 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var TH = require("TH");
+
+// Test for hit within the view circle
+var /*persistable:patient_window_is_in_view_circle*/ function is_in_view_circle(x, y) {
+  return (x - 55)**2 + (y - 254)**2 < 39**2;
+}
+
+//! Individual patient information dialog
+class ("UIPatient") (Window);
+
+//-@type UIPatient
+var UIPatient = _G["UIPatient"];
+
+function UIPatient::UIPatient(ui, patient) {
+  this->Window();
+
+  var app = ui.app;
+  this.esc_closes = true;
+  this.ui = ui;
+  this.modal_class = "humanoid_info";
+  this.width = 191;
+  this.height = 310;
+  this->setDefaultPosition(-20, 30);
+  this.panel_sprites = app.gfx->loadSpriteTable("QData", "Req02V", true);
+  this.font = app.gfx->loadFont("QData", "Font74V"); // Font used in the treatment history
+  this.patient = patient;
+  this.visible_diamond = ui->makeVisibleDiamond(75, 76);
+
+  this->addPanel(320,  15,   0); // Graph top
+  this->addPanel(321,  15,  61); // Graph bottom
+
+  this.history_panel = this->addColourPanel(36, 22, 99, 88, 223, 223, 223); // Treatment history background
+  this.history_panel->makeButton(0, 0, 99, 88, null, /*persistable:patient_toggle_history*/ function() {
+    this.history_panel.visible = ! this.history_panel.visible;
+  })->setTooltip(_S.tooltip.patient_window.graph); // Treatment history toggle
+  this.history_panel.visible = false; // Hide the treatment history at start
+
+  this->addPanel(322,  15, 126); // Happiness / thirst / temperature sliders
+  this->addPanel(323,   0, 201); // View circle top
+  this->addPanel(324,   0, 254); // View circle bottom
+  this->addPanel(325, 147,  21)->makeButton(0, 0, 24, 24, 326, this.close)->setTooltip(_S.tooltip.patient_window.close);
+
+  // If the patient has been diagnosed the "guess cure" button is not visible and
+  // if the patient is going home it is not possible to kick him/her anymore.
+  this->addPanel(411, 14 + 132, 61 + 19)->makeButton(0, 0, 25, 31, 412, this.viewQueue)->setTooltip(_S.tooltip.patient_window.queue);
+
+  // Initialize all buttons and blankers, then call the update function which decides what to show.
+  // Show the drug casebook only after the disease has been diagnosed.
+  this.disease_button = this->addPanel(329, 14 + 117, 61 + 107)
+    ->makeButton(0, 0, 38, 38, 330, this.viewDiseases)->setTooltip(_S.tooltip.patient_window.casebook);
+  this.disease_blanker = this->addColourPanel(14 + 115, 61 + 105, 45, 45, 113, 117, 170);
+
+  this.home_button = this->addPanel(331, 14 + 95, 61 + 158)->makeButton(0, 0, 60, 60, 332, this.goHome)->setTooltip(_S.tooltip.patient_window.send_home);
+  this.home_blanker = this->addColourPanel(14 + 93, 61 + 156, 67, 67, 113, 117, 170);
+
+  this.guess_button = this->addPanel(413, 14 + 117, 61 + 58)->makeButton(0, 0, 38, 38, 414, this.guessDisease)->setTooltip(_S.tooltip.patient_window.abort_diagnosis);
+  this.guess_blanker = this->addColourPanel(14 + 115, 61 + 56, 45, 45, 113, 117, 170);
+
+  // Set correct initial visibility/enabledness of the three buttons and their blankers
+  this->updateInformation();
+
+  this->makeTooltip(_S.tooltip.patient_window.happiness, 33, 117, 124, 141);
+  this->makeTooltip(_S.tooltip.patient_window.thirst,    33, 141, 124, 169);
+  this->makeTooltip(_S.tooltip.patient_window.warmth,    33, 169, 124, 203);
+
+  // Non-rectangular tooltip has to be realized with dynamic tooltip at the moment
+  this->makeDynamicTooltip(/*persistable:patient_window_center_tooltip*/function(x, y) {
+    if( is_in_view_circle(x, y) ) {
+      return _S.tooltip.patient_window.center_view;
+    }
+  }, 17, 216, 92, 292);
+
+  // Always add this because of a race condition if the user clicks a patient
+  // that's already going home, then clicks another, the handler is left empty. Bad.
+  // Just do a going_home check when called.
+  this->addKeyHandler("H", this.goHome);
+}
+
+//! Normalise warmth of a patient.
+//!param warmth (number or nil) If given, the fraction of warmth of the patient.
+//!return (float) Normalized warmth level.
+function UIPatient.normaliseWarmth(warmth) {
+  if( ! warmth ) { return 0.5; } // Return 1/2 if unknown.
+
+  if( warmth < 0.08 ) {
+    warmth = 0;
+  } else if( warmth > 0.50 ) {
+    warmth = 1;
+  } else {
+    warmth = (warmth - 0.08) / (0.50 - 0.08);
+  }
+  return warmth;
+}
+
+//! Draw a bar in the patient dialogue window.
+//!param canvas Canvas to draw at.
+//!param xbase Horizontal base position.
+//!param ybase Vertical base position.
+//!param xpos Horizontal offset.
+//!param ypos Vertical offset.
+//!param value Fraction to draw.
+function UIPatient::drawBar(canvas, xbase, ybase, xpos, ypos, value) {
+  var width = math.floor(value * 40 + 0.5);
+  for( dx = 0, width - 1 ) {
+    this.panel_sprites->draw(canvas, xbase, xpos + 58 + dx, ypos + ybase);
+  }
+}
+
+function UIPatient::draw(canvas, x_, y_) {
+  var x, y = this.x + x_, this.y + y_;
+  var map = this.ui.app.map;
+  var patient = this.patient;
+  // If the patient has just despawned, then it will have no tile, hence
+  // making it impossible to render said patient. In this case, the dialog
+  // should close. Note that it is slightly better to close the dialog during
+  // the draw callback rather than the tick callback, as doing so in the tick
+  // callback would be removing from the window list while said list is being
+  // iterated, causing the next window in the list to miss it's tick (rendering
+  // is done via a reverse traversal, which does not suffer this problem).
+  if( ! patient.tile_x ) {
+    this->close();
+    return;
+  }
+  var px, py = map->WorldToScreen(patient.tile_x, patient.tile_y);
+  var dx, dy = patient.th->getMarker();
+  px = px + dx - 37;
+  py = py + dy - 61;
+  // If the patient is spawning or despawning, or just on the map edge, then
+  // the rendering point needs adjustment to keep the rendered region entirely
+  // within the map (this situation doesn't occur very often, but we need to
+  // handle it properly when it does occur).
+  px, py = this.ui.limitPointToDiamond(px, py, this.visible_diamond, true);
+  this.ui.app.map->draw(canvas, px, py, 75, 76, x + 17, y + 216);
+  Window.draw(this, canvas, x_, y_);
+
+  // The patient bars (happiness, thirst, and warmth).
+  var warmth = this.normaliseWarmth(patient.attributes["warmth"]);
+
+  this->drawBar(canvas, 348, 126, x, y, patient.attributes["happiness"] || 0.5);
+  this->drawBar(canvas, 351, 154, x, y, 1 - (patient.attributes["thirst"] || 0.5));
+  this->drawBar(canvas, 349, 183, x, y, warmth);
+
+  if( this.history_panel.visible ) {
+    this->drawTreatmentHistory(canvas, x + 40, y + 25);
+  } else if( patient.health_history ) {
+    this->drawHealthHistory(canvas, x, y);
+  }
+}
+
+//! List the treatments that were performed on the patient.
+//!param canvas Destination to draw on.
+//!param x (int) X position of the top of the list.
+//!param y (int) Y position of the top of the list.
+function UIPatient::drawTreatmentHistory(canvas, x, y) {
+  for( _, room in ipairs(this.patient.treatment_history) ) {
+    y = this.font->drawWrapped(canvas, room, x, y, 95);
+  }
+}
+
+//! Draw the health graph of the patient.
+//!param canvas Destination to draw on.
+//!param x (int) X position of the top-left of the graph.
+//!param y (int) Y position of the top-left of the graph.
+function UIPatient::drawHealthHistory(canvas, x, y) {
+  // Sizes and positions of the graph in the window.
+  var hor_length = 76;
+  var vert_length = 70;
+  var startx = 58;
+  var starty = 27;
+
+  // Health history information.
+  var hh = this.patient.health_history;
+  var index = hh["last"];
+  var size = hh["size"];
+
+  var dx = hor_length / size;
+  var line = null; // Make a line the first time we find a non-nil value.
+  for( _ = 1, size ) {
+    index = (index == size) && 1 || (index + 1);
+    if( hh[index] ) {
+      var posy = starty + (1.0 - hh[index]) * vert_length;
+
+      if( ! line ) {
+        line = TH.line();
+        line->setWidth(2);
+        line->setColour(200, 55, 30, 255);
+        line->moveTo(startx, posy);
+      } else {
+        line->lineTo(startx, posy);
+      }
+    }
+    startx +=   dx;
+  }
+
+  if( line ) { line->draw(canvas, x, y); }
+}
+
+function UIPatient::onMouseDown(button, x, y) {
+  this.do_scroll = button == "left" && is_in_view_circle(x, y);
+  return Window.onMouseDown(this, button, x, y);
+}
+
+function UIPatient::onMouseUp(button, x, y) {
+  var ui = this.ui;
+  if( button == "left" ) {
+    this.do_scroll = false;
+  }
+  var repaint = Window.onMouseUp(this, button, x, y);
+  if( button == "right" && is_in_view_circle(x, y) ) {
+    // Right click goes to the next patient
+    var patient_index = null;
+    for( i, patient in ipairs(ui.hospital.patients) ) {
+      if( patient == this.patient ) {
+        patient_index = i;
+        break;
+      }
+    }
+    patient_index = (patient_index || 0) + 1;
+    var patient = ui.hospital.patients[patient_index] || ui.hospital.patients[1];
+    if( patient ) {
+      ui->addWindow(UIPatient(ui, patient));
+      return false;
+    }
+  }
+  return repaint;
+}
+
+function UIPatient::onMouseMove(x, y, dx, dy) {
+  this.do_scroll = this.do_scroll && is_in_view_circle(x, y);
+  return Window.onMouseMove(this, x, y, dx, dy);
+}
+
+/*! Scrolls the map to the position of the patient which this dialog belongs to */
+function UIPatient::scrollToPatient() {
+  var ui = this.ui;
+  var patient = this.patient;
+  var px, py = ui.app.map->WorldToScreen(patient.tile_x, patient.tile_y);
+  var dx, dy = patient.th->getPosition();
+  ui->scrollMapTo(px + dx, py + dy);
+}
+
+function UIPatient::onTick() {
+  if( this.do_scroll ) {
+    this->scrollToPatient();
+  }
+  return Window.onTick(this);
+}
+
+function UIPatient::updateInformation() {
+  var patient = this.patient;
+  if( patient.diagnosed ) {
+    this.disease_button.enabled = true;
+    this.disease_button.visible = true;
+    this.disease_blanker.visible = false;
+  } else {
+    this.disease_button.enabled = false;
+    this.disease_button.visible = false;
+    this.disease_blanker.visible = true;
+  }
+  if( patient.going_home ) {
+    this.home_button.enabled = false;
+    this.home_button.visible = false;
+    this.home_blanker.visible = true;
+  } else {
+    this.home_button.enabled = true;
+    this.home_button.visible = true;
+    this.home_blanker.visible = false;
+  }
+  if( patient.is_debug || patient.diagnosis_progress == 0 || patient.diagnosed || patient.going_home ) {
+    this.guess_button.enabled = false;
+    this.guess_button.visible = false;
+    this.guess_blanker.visible = true;
+  } else {
+    this.guess_button.enabled = true;
+    this.guess_button.visible = true;
+    this.guess_blanker.visible = false;
+  }
+}
+
+function UIPatient::viewQueue() {
+  for( _, action in ipairs(this.patient.action_queue) ) {
+    if( action.name == "queue" ) {
+      this.ui->addWindow(UIQueue(this.ui, action.queue));
+      this.ui->playSound("selectx.wav");
+      return;
+    }
+  }
+  this.ui->playSound("wrong2.wav");
+}
+
+function UIPatient::goHome() {
+  if( this.patient.going_home ) {
+    return;
+  }
+  this->close();
+  this.patient->playSound("sack.wav");
+  this.patient->goHome("kicked");
+  this.patient->updateDynamicInfo(_S.dynamic_info.patient.actions.sent_home);
+}
+
+function UIPatient::viewDiseases() {
+  var dlg = UICasebook(this.ui, this.patient.diagnosed && this.patient.disease.id || null);
+  this.ui->addWindow(dlg);
+}
+
+function UIPatient::guessDisease() {
+  var patient = this.patient;
+  // NB: the first line of conditions should already be ruled out by button being disabled, but just in case
+  if( patient.is_debug || patient.diagnosis_progress == 0 || patient.diagnosed ||
+      patient.going_home || patient->getRoom() ||
+      ! patient.hospital.disease_casebook[patient.disease.id].discovered ) {
+    this.ui->playSound("wrong2.wav");
+    return;
+  }
+  patient->setDiagnosed();
+  if( patient->agreesToPay(patient.disease.id) ) {
+    patient->setNextAction(SeekRoomAction(patient.disease.treatment_rooms[1])->enableTreatmentRoom(), 1);
+  } else {
+    patient->goHome("over_priced");
+  }
+}
+
+function UIPatient::hitTest(x, y) {
+  return Window.hitTest(this, x, y) || is_in_view_circle(x, y);
+}

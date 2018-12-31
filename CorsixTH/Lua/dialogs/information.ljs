@@ -1,0 +1,139 @@
+/* Copyright (c) 2009 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Dialog that informs the player of for example what the goals for the level are.
+class ("UIInformation") (Window);
+
+//-@type UIInformation
+var UIInformation = _G["UIInformation"];
+
+//! Constructor for the Information Dialog.
+//!param text The text to show, held in a table. All elements of the table will be written
+// beneath each other. If instead a table within the table is supplied the texts
+// will be shown in consecutive dialogs.
+//!param use_built_in_font Whether the built-in font should be used to make sure that
+// the given message can be read without distortions.
+function UIInformation::UIInformation(ui, text, use_built_in_font) {
+  this->Window();
+
+  var app = ui.app;
+  this.modal_class = "information";
+  this.esc_closes = true;
+  this.on_top = true;
+  this.ui = ui;
+  this.panel_sprites = app.gfx->loadSpriteTable("Data", "PulldV", true);
+  if( ! use_built_in_font ) {
+    this.black_font = app.gfx->loadFont("QData", "Font00V");
+  } else {
+    this.black_font = app.gfx->loadBuiltinFont();
+    this.black_background = true;
+  }
+
+  if( type(text[1]) == "table" ) {
+    this.text = text[1];
+    table.remove(text, 1);
+    this.additional_text = text;
+  } else {
+    this.text = text;
+  }
+
+  // Window size parameters
+  this.text_width = 300;
+  this.spacing = {
+    l = 40,
+    r = 40,
+    t = 20,
+    b = 20,
+  };
+
+  this->onChangeLanguage();
+
+  // Enter closes the window
+  this->addKeyHandler("return", this.close);
+  this->addKeyHandler("keypad enter", this.close);
+}
+
+function UIInformation::onChangeLanguage() {
+  var total_req_height = 0;
+  for( _, text in ipairs(this.text) ) {
+    var _, req_height = this.black_font->sizeOf(text, this.text_width);
+    total_req_height +=   req_height;
+  }
+
+  this.width = this.spacing.l + this.text_width + this.spacing.r;
+  this.height = this.spacing.t + total_req_height + this.spacing.b;
+  this->setDefaultPosition(0.5, 0.5);
+
+  this->removeAllPanels();
+
+  for( x = 4, this.width - 4, 4 ) {
+    this->addPanel(12, x, 0);  // Dialog top and bottom borders
+    this->addPanel(16, x, this.height-4);
+  }
+  for( y = 4, this.height - 4, 4 ) {
+    this->addPanel(18, 0, y);  // Dialog left and right borders
+    this->addPanel(14, this.width-4, y);
+  }
+  this->addPanel(11, 0, 0);  // Border top left corner
+  this->addPanel(17, 0, this.height-4);  // Border bottom left corner
+  this->addPanel(13, this.width-4, 0);  // Border top right corner
+  this->addPanel(15, this.width-4, this.height-4);  // Border bottom right corner
+
+  // Close button
+  this->addPanel(19, this.width - 30, this.height - 30)->makeButton(0, 0, 18, 18, 20, this.close)->setTooltip(_S.tooltip.information.close);
+}
+
+function UIInformation::draw(canvas, x, y) {
+  var dx, dy = x + this.x, y + this.y;
+  var background = this.black_background && canvas->mapRGB(0, 0, 0) || canvas->mapRGB(255, 255, 255);
+  canvas->drawRect(background, dx + 4, dy + 4, this.width - 8, this.height - 8);
+  var last_y = dy + this.spacing.t;
+  for( _, text in ipairs(this.text) ) {
+    last_y = this.black_font->drawWrapped(canvas, text, dx + this.spacing.l, last_y, this.text_width);
+  }
+
+  Window.draw(this, canvas, x, y);
+}
+
+function UIInformation::hitTest(x, y) {
+  if( x >= 0 && y >= 0 && x < this.width && y < this.height ) {
+    return true;
+  } else {
+    return Window.hitTest(this, x, y);
+  }
+}
+
+function UIInformation::close() {
+  this.ui->tutorialStep(3, 16, "next");
+  Window.close(this);
+  if( this.additional_text && #this.additional_text > 0 ) {
+    this.ui->addWindow(UIInformation(this.ui, this.additional_text));
+  }
+}
+
+function UIInformation::afterLoad(old, new) {
+  if( old < 101 ) {
+    this->removeKeyHandler("enter");
+    this->addKeyHandler("return", this.close);
+  }
+  if( old < 104 ) {
+    this->addKeyHandler("keypad enter", this.close);
+  }
+}

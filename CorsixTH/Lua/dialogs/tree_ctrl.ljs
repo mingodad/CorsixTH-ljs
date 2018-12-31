@@ -1,0 +1,697 @@
+/* Copyright (c) 2010 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Iterface for items within a UI tree control
+class ("TreeNode");
+
+//-@type TreeNode
+var TreeNode = _G["TreeNode"];
+
+function TreeNode::TreeNode() {
+  this.is_expanded = false;
+  this.num_visible_descendants = 0;
+}
+
+//! Get the number of childrem which the item has
+function TreeNode::getChildCount() {
+  error("To be implemented in subclasses");
+}
+
+//! Query if the item has any children at all.
+//! The simple way of doing this is checking if getChildCount() is non-zero,
+// but often this can be implemented in a more efficient manner.
+function TreeNode::hasChildren() {
+  return this->getChildCount() != 0;
+}
+
+//! Get a child of the item.
+//!param idx (integer) An integer between 1 and getChildCount() (inclusive).
+function TreeNode::getChildByIndex(idx) {
+  error("To be implemented in subclasses");
+}
+
+//! Given a child of the item, determine which index it is
+//!param child (TreeNode) A value returned from getChildByIndex()
+function TreeNode::getIndexOfChild(child) {
+  error("To be implemented in subclasses");
+}
+
+//! Get the text to be displayed for the item
+function TreeNode::getLabel() {
+  error("To be implemented in subclasses");
+}
+
+//! Get the item's parent, if it has one
+function TreeNode::getParent() {
+  return this.parent;
+}
+
+//! Get the tree control within which the item is displayed
+function TreeNode::getControl() {
+  return this.control || this->getParent()->getControl();
+}
+
+//! Query whether the item's children are visible
+function TreeNode::isExpanded() {
+  return this.is_expanded;
+}
+
+//! Get the background colour for when the item is highlighted
+function TreeNode::getHighlightColour(canvas) {
+  return null;
+}
+
+//! Get the background colour for when the item is selected
+function TreeNode::getSelectColour(canvas) {
+  return canvas->mapRGB(174, 166, 218);
+}
+
+//! Make the children of the item visible
+function TreeNode::expand() {
+  if( this.is_expanded ) { return; }
+  this.is_expanded = true;
+  this.num_visible_descendants = 0;
+  for( i = 1, this->getChildCount() ) {
+    this.num_visible_descendants = this.num_visible_descendants +
+      1 + this->getChildByIndex(i).num_visible_descendants;
+  }
+  var parent = this->getParent();
+  while( parent ) {
+    parent.num_visible_descendants = parent.num_visible_descendants +
+      this.num_visible_descendants;
+    parent = parent->getParent();
+  }
+  this->getControl()->onNumVisibleNodesChange();
+}
+
+//! Make the children of the item invisible
+function TreeNode::contract() {
+  if( ! this.is_expanded ) { return; }
+  this.is_expanded = false;
+  var parent = this->getParent();
+  while( parent ) {
+    parent.num_visible_descendants = parent.num_visible_descendants -
+      this.num_visible_descendants;
+    parent = parent->getParent();
+  }
+  this.num_visible_descendants = 0;
+  this->getControl()->onNumVisibleNodesChange();
+}
+
+//! The number of visible items in the set of this item and all its descendants
+function TreeNode::numVisibleDescendants() {
+  if( this.hidden ) {
+    return this.num_visible_descendants;
+  } else {
+    return this.num_visible_descendants + 1;
+  }
+}
+
+//! Get the depth from the root item to this item.
+//! The root item has level 0, its direct children have level 1, etc.
+function TreeNode::getLevel() {
+  var level = this.level;
+  if( ! level ) {
+    var parent = this->getParent();
+    if( parent ) {
+      level = parent->getLevel() + 1;
+    } else {
+      level = 0;
+    }
+    this.level = level;
+  }
+  return level;
+}
+
+//! Get the previous item in the on-screen display order
+function TreeNode::getPrevVisible() {
+  var parent = this->getParent();
+  if( ! parent ) {
+    return;
+  }
+  var idx = parent->getIndexOfChild(this);
+  if( idx == 1 ) {
+    return parent;
+  } else {
+    var prev = parent->getChildByIndex(idx - 1);
+    while( prev->isExpanded() ) {
+      if( ! prev->hasChildren() ) {
+        break;
+      } else {
+        prev = prev->getChildByIndex(prev->getChildCount());
+      }
+    }
+    return prev;
+  }
+}
+
+//! Get the next item in the on-screen display order
+function TreeNode::getNextVisible() {
+  if( this->isExpanded() && this->hasChildren() ) {
+    return this->getChildByIndex(1);
+  }
+  while( true ) {
+    var parent = this->getParent();
+    if( ! parent ) {
+      return;
+    }
+    var idx = parent->getIndexOfChild(this);
+    if( idx == parent->getChildCount() ) {
+      this = parent;
+    } else {
+      return parent->getChildByIndex(idx + 1);
+    }
+  }
+}
+
+//! A tree node representing a file (or directory) in the physical file-system.
+class ("FileTreeNode") (TreeNode);
+
+//-@type FileTreeNode
+var FileTreeNode = _G["FileTreeNode"];
+
+var pathsep = package.config->sub(1, 1);
+
+function FileTreeNode::FileTreeNode(path) {
+  this->TreeNode();
+  if( path->sub(-1) == pathsep && path != pathsep ) {
+    path = path->sub(1, -2);
+  }
+  this.path = path;
+  this.children = {};
+  this.has_looked_for_children = false;
+  // Default sorting is by name
+  this.sort_by = "name";
+  this.order = "ascending";
+}
+
+function FileTreeNode::isDirectory() {
+  return lfs.attributes(this.path, "mode") == "directory";
+}
+
+//-
+//@param <file_name_filter> (optional) return the most recently modified child file which has this string in its name.
+//@return nil if no child file is found otherwise return the FileTreedNode for mostly recently modified child file.
+function FileTreeNode::getMostRecentlyModifiedChildFile(file_name_filter) {
+  this->checkForChildren();
+  this->reSortChildren("date", "descending");
+  var most_recently_mod_child_dir_file = null;
+  var root_child = null;
+  //A. Search for files matching the file name filter in the root directory and its child directories:
+  for( i = 1, this->getChildCount(), 1 ) {
+    root_child = this->getChildByIndex(i);
+    // 1. Get the most recently modified child directory file which matches the name filter:
+    if( root_child->isDirectory() ) {
+      var current_child_dir_file = root_child->getMostRecentlyModifiedChildFile(file_name_filter);
+      if( current_child_dir_file != null ) {
+        if( most_recently_mod_child_dir_file == null ) {
+          most_recently_mod_child_dir_file = current_child_dir_file;
+        } else if( current_child_dir_file->getLastModification() > most_recently_mod_child_dir_file->getLastModification() ) {
+          most_recently_mod_child_dir_file = current_child_dir_file;
+        }
+      }
+
+    // Sort always puts directories first so when this else closure is reached in this iterative for loop
+    // all the sub directories will have been checked:
+    } else {
+      // 2. Get the most recently modified root directory file which matches the name filter:
+      var matches_filter = true;
+      if((file_name_filter) ) {
+        matches_filter = string.find(root_child->getLabel(), file_name_filter);
+      }
+      // End this for loop to begin step B:
+      if( matches_filter ) {
+        break;
+      }
+    }
+    root_child = null;
+  }
+  //B. Return the most recently modified file or nil if no file matching the name filter was found:
+  if( most_recently_mod_child_dir_file ) {
+    if( root_child ) {
+      if( root_child->getLastModification() > most_recently_mod_child_dir_file->getLastModification() ) {
+        return root_child;
+      }
+    }
+    return most_recently_mod_child_dir_file;
+  } else if( root_child ) {
+    return root_child;
+  } else {
+    return null;
+  }
+}
+
+function FileTreeNode::childPath(item) {
+  if( this.path->sub(-1, -1) == pathsep ) {
+    return this.path .. item;
+  } else {
+    return this.path .. pathsep .. item;
+  }
+}
+
+function FileTreeNode::hasChildren() {
+  if( this.has_looked_for_children ) {
+    return #this.children != 0;
+  } else if( this.has_children == null ) {
+    if( this->getLevel() == 0 ) {
+      // Assume root level things have children until we really need to check
+      return true;
+    }
+    this.has_children = false;
+    // Only directories have children.
+    if( lfs.attributes(this.path, "mode") != "directory" ) {
+      return false;
+    }
+    var status, _f, _s, _v = pcall(lfs.dir, this.path);
+    if( ! status ) {
+      print("Error while fetching children for " .. this.path .. ": " .. _f);
+    } else {
+      for( item in _f, _s, _v ) {
+        if( this->isValidFile(item) ) {
+          this.has_children = true;
+          break;
+        }
+      }
+    }
+  }
+  return this.has_children;
+}
+
+//! Returns whether the given file name is valid
+//  in this tree. Override for desired behaviour.
+function FileTreeNode::isValidFile(name) {
+  return name != "." && name != "..";
+}
+
+function FileTreeNode::createNewNode(path) {
+  return FileTreeNode(path);
+}
+
+function FileTreeNode::expand() {
+  TreeNode.expand(this);
+  this->reSortChildren(this.sort_by, this.order);
+}
+
+var function sort_by_key(t1, t2) {
+  var second_mode = lfs.attributes(t2.path, "mode") == "directory";
+  if( lfs.attributes(t1.path, "mode") == "directory" ) {
+    if( second_mode ) {
+      if( t1.order == "ascending" ) {
+        return t1.sort_key < t2.sort_key;
+      } else {
+        return t1.sort_key > t2.sort_key;
+      }
+    } else {
+      return true;
+    }
+  } else {
+    if( second_mode ) {
+      return false;
+    } else {
+      if( t1.order == "ascending" ) {
+        return t1.sort_key < t2.sort_key;
+      } else {
+        return t1.sort_key > t2.sort_key;
+      }
+    }
+  }
+}
+
+//! Sorts the node and its children either by date or by name.
+//!param sort_by What to sort by. Either "name" or "date".
+//!param order If the ordering should be "ascending" or "descending".
+function FileTreeNode::reSortChildren(sort_by, order) {
+  for( _, child in ipairs(this.children) ) {
+    if( sort_by == "date" ) {
+      child.sort_key = lfs.attributes(child.path, "modification");
+      child.sort_by = sort_by;
+      child.order = order;
+    } else if( sort_by == "name" ) {
+      child.sort_key = child->getLabel()->lower();
+      child.sort_by = sort_by;
+      child.order = order;
+    } else {
+      // No sorting
+      return;
+    }
+  }
+  table.sort(this.children, sort_by_key);
+  for( i, child in ipairs(this.children) ) {
+    this.children[child] = i;
+    child->reSortChildren(sort_by, order);
+  }
+}
+
+function FileTreeNode::checkForChildren() {
+  if( ! this.has_looked_for_children ) {
+    this.has_looked_for_children = true;
+    if( this.has_children == false ) {
+      // Already checked and found nothing
+      return;
+    }
+    for( item in lfs.dir(this.path) ) {
+      var path = this->childPath(item);
+      if( this->isValidFile(item) ) {
+        var node = this->createNewNode(path);
+        node.sort_key = item->lower();
+        this.children[#this.children + 1] = node;
+      }
+    }
+
+    for( i, child in ipairs(this.children) ) {
+      this.children[child] = i;
+      this.children[child.sort_key] = i;
+      child.parent = this;
+    }
+  }
+}
+
+function FileTreeNode::getHighlightColour(canvas) {
+  var highlight_colour = this.highlight_colour;
+  if( highlight_colour == null ) {
+    highlight_colour = false;
+    if( type(this.filter_by) == "table" ) {
+      for( _, ext in ipairs(this.filter_by) ) {
+        if( string.sub(this.path->lower(), -string.len(ext)) == ext ) {
+          this.is_valid_file = true;
+          highlight_colour = canvas->mapRGB(0, 255, 0);
+        }
+      }
+    } else if( this.filter_by && string.sub(this.path->lower(), -string.len(this.filter_by)) == this.filter_by ) {
+      this.is_valid_file = true;
+      highlight_colour = canvas->mapRGB(0, 255, 0);
+    }
+    this.highlight_colour = highlight_colour;
+  }
+  return highlight_colour || null;
+}
+
+function FileTreeNode::getChildCount() {
+  this->checkForChildren();
+  return #this.children;
+}
+
+function FileTreeNode::getChildByIndex(idx) {
+  this->checkForChildren();
+  return this.children[idx];
+}
+
+function FileTreeNode::getIndexOfChild(child) {
+  return this.children[child];
+}
+
+function FileTreeNode::getLabel() {
+  var label = this.label;
+  if( ! label ) {
+    var parent = this->getParent();
+    if( parent && parent.path ) {
+      if( parent.path->sub(-1, -1) == pathsep ) {
+        label = this.path->sub(#parent.path + 1, -1);
+      } else {
+        label = this.path->sub(#parent.path + 2, -1);
+      }
+    } else {
+      label = this.path;
+    }
+    this.label = label;
+  }
+  return label;
+}
+
+function FileTreeNode::getLastModification() {
+  return lfs.attributes(this.path, "modification");
+}
+
+//! Selects an item. By default everything selected is valid. Can be overridden
+// by inheriting classes.
+function FileTreeNode::select() {
+  this.is_valid_directory = true;
+}
+
+//! A tree node which can be used as a root node to give the effect of having
+// multiple root nodes.
+class ("DummyRootNode") (TreeNode);
+
+//-@type DummyRootNode
+var DummyRootNode = _G["DummyRootNode"];
+
+//!param roots (array) An array of `TreeNode`s which should be displayed as
+// root nodes.
+function DummyRootNode::DummyRootNode(roots) {
+  this->TreeNode();
+  this.children = {};
+  for( i, child in ipairs(roots) ) {
+    this.children[i] = child;
+    this.children[child] = i;
+    child.parent = this;
+  }
+  this.level = -1; // to make children level 0
+  this.hidden = true;
+}
+
+function DummyRootNode::getChildCount() {
+  return #this.children;
+}
+
+function DummyRootNode::getChildByIndex(idx) {
+  return this.children[idx];
+}
+
+function DummyRootNode::getIndexOfChild(child) {
+  return this.children[child];
+}
+
+//! A control (to be placed on a window) which allows the user to navigate a
+// tree of items and select one item from it.
+class ("TreeControl") (Window);
+
+//-@type TreeControl
+var TreeControl = _G["TreeControl"];
+
+//!param root (TreeNode) The single root node of the tree (use a `DummyRootNode`
+// here if multiple root nodes are desired).
+//!param x (integer) The X-position, in pixels, where the control should start
+// within its parent.
+//!param y (integer) The Y-position, in pixels, where the control should start
+// within its parent.
+//!param width (integer) The width, in pixels, of the control.
+//!param height (integer) The height, in pixels, of the control.
+//!param col_bg (table) The background colour of the control - this should be
+// a table with `red`, `green`, and `blue` fields, each an integer between 0
+// and 255.
+//!param col_fg (table) The colour used for the scrollbar and highlighted items.
+function TreeControl::TreeControl(root, x, y, width, height, col_bg, col_fg, y_offset, has_font) {
+  // Setup the base window
+  this->Window();
+  this.x = x;
+  this.y = y;
+  this.width = width;
+  this.height = height;
+  this.y_offset = y_offset || 0;
+
+  // Load the graphical resources
+  var gfx = TheApp.gfx;
+  if( ! has_font ) {
+    this.font = gfx->loadBuiltinFont();
+  } else {
+    this.font = TheApp.gfx->loadFont("QData", "Font01V");
+  }
+  this.tree_sprites = gfx->loadSpriteTable("Bitmap", "tree_ctrl", true,
+    gfx->loadPalette("Bitmap", "tree_ctrl.pal"));
+
+  // Calculate sizes and counts
+  var scrollbar_width = 20;
+  this.row_height = 14;
+  this.tree_rect = {
+    x = 0,
+    y = 0,
+    w = width - scrollbar_width,
+    h = height - height % this.row_height,
+  };
+  this.num_rows = (this.tree_rect.h - this.y_offset) / this.row_height;
+  this->addBevelPanel(0, 0, width, height, col_bg).lowered = true;
+  var scrollbar_base = this->addBevelPanel(width - scrollbar_width, 0,
+    scrollbar_width, height, col_bg);
+  scrollbar_base.lowered = true;
+  this.scrollbar = scrollbar_base->makeScrollbar(col_fg,
+    /*persistable:tree_ctrl_scrollbar_callback*/ function() {
+    this->onScroll();
+  }, 1, 1, this.num_rows);
+  this.tree_root = root;
+  if( root.hidden ) {
+    this.first_visible_node = root->getChildByIndex(1);
+  } else {
+    this.first_visible_node = root;
+  }
+  root.control = this;
+  this.first_visible_ordinal = 1;
+  root->expand();
+}
+
+
+function TreeControl::hitTestTree(x, y) {
+  var rect = this.tree_rect;
+  x = x - rect.x;
+  y = y - rect.y - this.y_offset;
+  if( 0 <= x && 0 <= y && x < rect.w && y < rect.h ) {
+    var n = math.floor(y / this.row_height);
+    var node = this.first_visible_node;
+    while( n != 0 && node ) {
+      node = node->getNextVisible();
+      --n    ;
+    }
+    if( n == 0 ) {
+      if( node ) {
+        var level = node->getLevel();
+        if( x > level * 14 ) {
+          if( x < (level+1) * 14 ) {
+            return node, true;
+          } else {
+            return node, false;
+          }
+        }
+      }
+    }
+  }
+}
+
+function TreeControl::onMouseMove(x, y) {
+  var redraw = Window.onMouseMove(this, x, y);
+  var node, expand = this->hitTestTree(x, y);
+  if( expand && this.highlighted_node != null ) {
+    this.highlighted_node = null;
+    return redraw;
+  } else if( ! expand && node != this.highlighted_node ) {
+    this.highlighted_node = node;
+    return redraw;
+  }
+  return redraw;
+}
+
+function TreeControl::onMouseDown(button, x, y) {
+  var redraw = Window.onMouseDown(this, button, x, y);
+  if( button != 4 && button != 5 ) {
+    // NB: 4 and 5 are scrollwheel
+    this.mouse_down_in_self = false;
+    if( 0 <= x && 0 <= y && x < this.width && y < this.height ) {
+      this.mouse_down_in_self = true;
+      redraw = true;
+    }
+  }
+  return redraw;
+}
+
+function TreeControl::setSelectCallback(callback) {
+  this.select_callback = callback;
+  return this;
+}
+
+function TreeControl::onMouseUp(button, x, y) {
+  var redraw = Window.onMouseUp(this, button, x, y);
+  var node, expand = this->hitTestTree(x, y);
+  if( this.mouse_down_in_self && node ) {
+    if( expand ) {
+      if( node->hasChildren() ) {
+        if( node->isExpanded() ) {
+          node->contract();
+        } else {
+          node->expand();
+        }
+        redraw = true;
+      }
+    } else if( this.selected_node == node && this.select_callback ) {
+      this.select_callback(node);
+    } else {
+      this.selected_node = node;
+      node->select();
+      redraw = true;
+    }
+  }
+  this.mouse_down_in_self = false;
+  return redraw;
+}
+
+function TreeControl::onMouseWheel(x, y) {
+  this.scrollbar->setXorY(this.scrollbar->getXorY() - y * 8);
+}
+
+function TreeControl::onNumVisibleNodesChange() {
+  this.scrollbar->setRange(1, this.tree_root->numVisibleDescendants(),
+    this.num_rows, this.first_visible_ordinal);
+}
+
+function TreeControl::onScroll() {
+  if( this.scrollbar.value > this.first_visible_ordinal ) {
+    for( _ = 1, this.scrollbar.value - this.first_visible_ordinal ) {
+      this.first_visible_node = this.first_visible_node->getNextVisible();
+    }
+  } else if( this.scrollbar.value < this.first_visible_ordinal ) {
+    for( _ = 1, this.first_visible_ordinal - this.scrollbar.value ) {
+      this.first_visible_node = this.first_visible_node->getPrevVisible();
+    }
+  }
+  this.first_visible_ordinal = this.scrollbar.value;
+}
+
+//! Override this function if a certain row should have certain text
+// or additional flavour to it.
+function TreeControl::drawExtraOnRow(canvas, node, x, y) {
+}
+
+function TreeControl::draw(canvas, x, y) {
+  Window.draw(this, canvas, x, y);
+  x = x + this.x + this.tree_rect.x;
+  y = y + this.y + this.tree_rect.y + this.y_offset;
+
+  var node = this.first_visible_node;
+  var num_nodes_drawn = 0;
+  while( node && num_nodes_drawn < this.num_rows ) {
+    var level = node->getLevel();
+    for( i = 0, level - 1 ) {
+      this.tree_sprites->draw(canvas, 1, x + i * 14, y);
+    }
+
+    if( node == this.highlighted_node ) {
+      var offset = (level + 1) * 14;
+      var colour = node->getHighlightColour(canvas) || this.scrollbar.slider.colour;
+      canvas->drawRect(colour, x + offset - 1, y, this.tree_rect.w - offset - 1, this.row_height);
+    }
+    if( node == this.selected_node ) {
+      var offset = (level + 1) * 14;
+      var colour = node->getSelectColour(canvas) || this.scrollbar.slider.colour;
+      canvas->drawRect(colour, x + offset - 1, y, this.tree_rect.w - offset - 1, this.row_height);
+    }
+
+    var icon;
+    if( ! node->hasChildren() ) {
+      icon = 2;
+    } else if( node->isExpanded() ) {
+      icon = 4;
+    } else {
+      icon = 3;
+    }
+    this.tree_sprites->draw(canvas, icon, x + level * 14, y);
+    this.font->draw(canvas, node->getLabel(), x + (level + 1) * 14, y + 2);
+    this->drawExtraOnRow(canvas, node, x, y);
+    y = y + this.row_height;
+    ++num_nodes_drawn    ;
+    node = node->getNextVisible();
+  }
+}

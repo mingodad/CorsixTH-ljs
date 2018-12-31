@@ -1,0 +1,401 @@
+/* Copyright (c) 2009 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Drug Casebook fullscreen window (view disease statistics and set prices).
+class ("UICasebook") (UIFullscreen);
+
+//-@type UICasebook
+var UICasebook = _G["UICasebook"];
+
+function UICasebook::UICasebook(ui, disease_selection) {
+  this->UIFullscreen(ui);
+  var gfx = ui.app.gfx;
+  if( ! pcall(function() {
+    this.background = gfx->loadRaw("DrugN01V", 640, 480);
+    var palette = gfx->loadPalette("QData", "DrugN01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    this.panel_sprites = gfx->loadSpriteTable("QData", "DrugN02V", true, palette);
+    this.title_font = gfx->loadFont("QData", "Font25V", false, palette);
+    this.selected_title_font = gfx->loadFont("QData", "Font26V", false, palette);
+    this.drug_font = gfx->loadFont("QData", "Font24V", false, palette);
+  }) ) {
+    ui->addWindow(UIInformation(ui, {_S.errors.dialog_missing_graphics}));
+    this->close();
+    return;
+  }
+
+  this.hospital = ui.hospital;
+  this.casebook = this.hospital.disease_casebook;
+  this->updateDiseaseList();
+
+  // Buttons
+  this->addPanel(0, 607, 449)->makeButton(0, 0, 26, 26, 3, this.close)->setTooltip(_S.tooltip.casebook.close);
+  this->addPanel(0, 439, 29)->makeRepeatButton(0, 0, 70, 46, 1, this.scrollUp)->setTooltip(_S.tooltip.casebook.up);
+  this->addPanel(0, 437, 394)->makeRepeatButton(0, 0, 77, 53, 2, this.scrollDown)->setTooltip(_S.tooltip.casebook.down);
+  this->addPanel(0, 354, 133)->makeRepeatButton(0, 0, 22, 22, 5, this.increasePay)->setTooltip(_S.tooltip.casebook.increase);
+  this->addPanel(0, 237, 133)->makeRepeatButton(0, 0, 22, 22, 4, this.decreasePay)->setTooltip(_S.tooltip.casebook.decrease);
+  this->addPanel(0, 235, 400)->makeButton(0, 0, 140, 20, 0, this.concentrateResearch)
+    ->setTooltip(_S.tooltip.casebook.research);
+
+  // Hotkeys
+  this->addKeyHandler("up", this.scrollUp);
+  this->addKeyHandler("down", this.scrollDown);
+  this->addKeyHandler("right", this.increasePay);
+  this->addKeyHandler("left", this.decreasePay);
+
+  // Icons representing cure effectiveness and other important information.
+  this.machinery = this->addPanel(6, 306, 352)->setTooltip(_S.tooltip.casebook.cure_type.machine);
+  this.machinery.visible = false;
+  this.drug = this->addPanel(7, 306, 352)->setDynamicTooltip(/*persistable:casebook_drug_tooltip*/ function() {
+    return _S.tooltip.casebook.cure_type.drug_percentage->format(this.casebook[this.selected_disease].cure_effectiveness);
+  });
+  this.drug.visible = false;
+  this.surgery = this->addPanel(8, 306, 352)->setTooltip(_S.tooltip.casebook.cure_type.surgery);
+  this.surgery.visible = false;
+  this.unknown = this->addPanel(9, 306, 352)->setTooltip(_S.tooltip.casebook.cure_type.unknown);
+  this.unknown.visible = false;
+  this.psychiatry = this->addPanel(10, 306, 352)->setTooltip(_S.tooltip.casebook.cure_type.psychiatrist);
+  this.psychiatry.visible = false;
+
+  this.curable = this->addPanel(11, 335, 352)->setTooltip(_S.tooltip.casebook.cure_requirement.possible);
+  this.curable.visible = false;
+  this.not_curable = this->addPanel(12, 335, 352)->setTooltip(_S.tooltip.casebook.cure_requirement.not_possible); // TODO: split up in more specific requirements
+  this.not_curable.visible = false;
+
+  this.percentage_counter = false; // Counter for displaying cure price percentage for a certain time before switching to price.
+
+  this->makeTooltip(_S.tooltip.casebook.reputation,       249,  72, 362, 117);
+  this->makeTooltip(_S.tooltip.casebook.treatment_charge, 249, 117, 362, 161);
+  this->makeTooltip(_S.tooltip.casebook.earned_money,     247, 161, 362, 205);
+  this->makeTooltip(_S.tooltip.casebook.cured,            247, 205, 362, 249);
+  this->makeTooltip(_S.tooltip.casebook.deaths,           247, 249, 362, 293);
+  this->makeTooltip(_S.tooltip.casebook.sent_home,        247, 293, 362, 337);
+
+  if( disease_selection ) {
+    this->selectDisease(disease_selection);
+  } else {
+    this.selected_index = #this.names_sorted;
+    this.selected_disease = this.names_sorted[this.selected_index];
+    this->updateIcons();
+  }
+}
+
+function UICasebook::close() {
+  UIFullscreen.close(this);
+  this.ui->getWindow(UIBottomPanel)->updateButtonStates();
+}
+
+//! The diseases list has been changed, update the list.
+function UICasebook::updateDiseaseList() {
+  // A sorted list of known diseases and pseudo diseases.
+  // Used to be able to list the diseases in, believe it or not,
+  // alphabetical order.
+  this.names_sorted = {};
+  for( n, value in pairs(this.casebook) ) {
+    if( value.discovered ) {
+      this.names_sorted[#this.names_sorted + 1] = n;
+    }
+  }
+  table.sort(this.names_sorted, function(d1, d2) {
+    var c1, c2 = this.casebook[d1], this.casebook[d2];
+    if( c1.pseudo != c2.pseudo ) {
+      return c1.pseudo;
+    }
+    return c1.disease.name->upper() < c2.disease.name->upper();
+  });
+
+  if( this.selected_disease ) { // Re-select the current disease.
+    this->selectDisease(this.selected_disease);
+  }
+}
+
+//! Select a disease by name.
+//!param disease (string) Name of the disease
+function UICasebook::selectDisease(disease) {
+  for( i = 1, #this.names_sorted ) {
+    if( disease == this.names_sorted[i] ) {
+      this.selected_index = i;
+      this.selected_disease = this.names_sorted[this.selected_index];
+      break;
+    }
+  }
+  this->updateIcons();
+}
+
+//! Function that is called when a new entry is selected in some way
+//! It updates all icons etc. that react to what is selected
+function UICasebook::updateIcons() {
+  var disease = this.selected_disease;
+  var hosp = this.hospital;
+  var world = hosp.world;
+
+  var known = true;
+  // Curable / not curable icons and their tooltip
+  if( this.casebook[disease].pseudo ) {
+    this.curable.visible = false;
+    this.not_curable.visible = false;
+  } else {
+    var req = hosp->checkDiseaseRequirements(disease);
+    if( ! req ) {
+      this.curable.visible = true;
+      this.not_curable.visible = false;
+    } else {
+      this.curable.visible = false;
+      this.not_curable.visible = true;
+
+      // Strings for the tooltip
+      var research = false;
+      var build = false;
+      var staff = false;
+      // Room requirements
+      if( #req.rooms > 0 ) {
+        for( _, room_id in ipairs(req.rooms) ) {
+          // Not researched yet?
+          if( ! hosp.discovered_rooms[world.available_rooms[room_id]] ) {
+            known = false;
+            research = (research && (research .. ", ") || " (") .. TheApp.rooms[room_id].name;
+          }
+          // Researched, but not built. TODO: maybe make this an else clause to not oversize the tooltip that much
+          build = (build && (build .. ", ") || " (") .. TheApp.rooms[room_id].name;
+        }
+      }
+      research = research && (_S.tooltip.casebook.cure_requirement.research_machine .. research .. "). ") || "";
+      build    = build    && (_S.tooltip.casebook.cure_requirement.build_room .. build .. "). ") || "";
+
+      var staffclass_to_string = {
+        Nurse        = _S.staff_title.nurse,
+        Doctor       = _S.staff_title.doctor,
+        Surgeon      = _S.staff_title.surgeon,
+        Psychiatrist = _S.staff_title.psychiatrist,
+        Researcher   = _S.staff_title.researcher,
+      };
+
+      // Staff requirements
+      for( sclass, amount in pairs(req.staff) ) {
+        staff = (staff && (staff .. ", ") || " (") .. staffclass_to_string[sclass] .. ": " .. amount;
+      }
+      staff = staff && (_S.tooltip.casebook.cure_requirement.hire_staff .. staff .. "). ") || "";
+
+      this.not_curable->setTooltip(research .. build .. staff);
+    }
+  }
+
+  this.unknown.visible    = ! known;
+  this.drug.visible       = known && ! ! this.casebook[disease].drug;
+  this.machinery.visible  = known && ! ! this.casebook[disease].machine && ! this.casebook[disease].pseudo;
+  this.psychiatry.visible = known && ! ! this.casebook[disease].psychiatrist;
+  this.surgery.visible    = known && ! ! this.casebook[disease].surgeon;
+
+  this.ui->updateTooltip(); // for the case that mouse is hovering over icon while player scrolls through list with keys
+  this.percentage_counter = 50;
+}
+
+function UICasebook::draw(canvas, x, y) {
+  this.background->draw(canvas, this.x + x, this.y + y);
+  UIFullscreen.draw(this, canvas, x, y);
+
+  x, y = this.x + x, this.y + y;
+  var titles = this.title_font;
+  var book = this.casebook;
+  var disease = this.selected_disease;
+  var selected = this.selected_index;
+
+  // All titles
+  titles->draw(canvas, _S.casebook.reputation,       x + 278, y + 68);
+  titles->draw(canvas, _S.casebook.treatment_charge, x + 260, y + 113);
+  titles->draw(canvas, _S.casebook.earned_money,     x + 265, y + 157);
+  titles->draw(canvas, _S.casebook.cured,            x + 276, y + 201);
+  titles->draw(canvas, _S.casebook.deaths,           x + 279, y + 245);
+  titles->draw(canvas, _S.casebook.sent_home,        x + 270, y + 289);
+  titles->draw(canvas, _S.casebook.cure,             x + 255, y + 354);
+
+  // Specific disease information
+  if( this.hospital->canConcentrateResearch(disease) ) {
+    if( book[disease].concentrate_research ) {  // Concentrate research
+      this.selected_title_font->draw(canvas, _S.casebook.research, x + 245, y + 398);
+    } else {
+      titles->draw(canvas, _S.casebook.research, x + 245, y + 398);
+    }
+  }
+  var rep = book[disease].reputation || this.hospital.reputation;
+  if( rep < this.hospital.reputation_min ) {
+    rep = this.hospital.reputation_min;
+  } else if( rep > this.hospital.reputation_max ) {
+    rep = this.hospital.reputation_max;
+  }
+
+  titles->draw(canvas, rep, x + 248, y + 92, 114, 0); // Reputation
+
+  // Treatment Charge is either displayed in percent, or normally
+  var price_text = this.percentage_counter && ("%.0f%%")->format(book[disease].price * 100) ||
+      "$" .. this.hospital->getTreatmentPrice(disease);
+  titles->draw(canvas, price_text, x + 262, y + 137, 90, 0); // Treatment Charge
+
+  titles->draw(canvas, "$" .. book[disease].money_earned, x + 248, y + 181, 114, 0); // Money Earned
+  titles->draw(canvas, book[disease].recoveries, x + 248, y + 225, 114, 0); // Recoveries
+  titles->draw(canvas, book[disease].fatalities, x + 248, y + 269, 114, 0); // Fatalities
+  titles->draw(canvas, book[disease].turned_away, x + 248, y + 313, 114, 0); // Turned away
+
+  // Cure percentage
+  if( this.drug.visible ) {
+    this.drug_font->draw(canvas, book[disease].cure_effectiveness, x + 313, y + 364, 16, 0);
+  }
+  // Right-hand side list of diseases (and pseudo diseases)
+  var index = 1;
+  while( selected - index > 0 && index <= 7 ) {
+    titles->draw(canvas, book[this.names_sorted[selected - index]].disease.name->upper(), x + 409, y + 203 - index*18);
+    ++index    ;
+  }
+  this.selected_title_font->draw(canvas, book[disease].disease.name->upper(), x + 409, y + 227);
+  index = 1;
+  while( index + selected <= #this.names_sorted && index <= 7 ) {
+    titles->draw(canvas, book[this.names_sorted[index + selected]].disease.name->upper(), x + 409, y + 251 + index*18);
+    ++index    ;
+  }
+}
+
+function UICasebook::scrollUp() {
+  if( this.selected_index > 1 ) {
+    if( this.ui.app.key_modifiers.ctrl ) {
+      this.selected_index = 1;
+    } else {
+      this.selected_index = this.selected_index - 1;
+    }
+
+    this.selected_disease = this.names_sorted[this.selected_index];
+    this.ui->playSound("pagetur2.wav");
+  } else {
+    this.ui->playSound("Wrong2.wav");
+  }
+  this->updateIcons();
+}
+
+function UICasebook::scrollDown() {
+  if( this.selected_index < #this.names_sorted ) {
+    if( this.ui.app.key_modifiers.ctrl ) {
+      this.selected_index = #this.names_sorted;
+    } else {
+      this.selected_index = this.selected_index + 1;
+    }
+
+    this.selected_disease = this.names_sorted[this.selected_index];
+    this.ui->playSound("pagetur2.wav");
+  } else {
+    this.ui->playSound("Wrong2.wav");
+  }
+  this->updateIcons();
+}
+
+function UICasebook::increasePay() {
+  var price = this.casebook[this.selected_disease].price;
+  var amount = 0.01;
+  if( this.ui.app.key_modifiers.ctrl ) {
+    amount *=   25;
+  } else if( this.ui.app.key_modifiers.shift ) {
+    amount *=   5;
+  }
+  price +=   amount;
+  if( price > 2 ) {
+    price = 2;
+    this.ui->playSound("Wrong2.wav");
+  } else {
+    this.ui->playSound("selectx.wav");
+  }
+  this.casebook[this.selected_disease].price = price;
+  this.percentage_counter = 50;
+}
+
+function UICasebook::decreasePay() {
+  var price = this.casebook[this.selected_disease].price;
+  var amount = 0.01;
+  if( this.ui.app.key_modifiers.ctrl ) {
+    amount *=   25;
+  } else if( this.ui.app.key_modifiers.shift ) {
+    amount *=   5;
+  }
+  price -=   amount;
+  if( price < 0.5 ) {
+    price = 0.5;
+    this.ui->playSound("Wrong2.wav");
+  } else {
+    this.ui->playSound("selectx.wav");
+  }
+  this.casebook[this.selected_disease].price = price;
+  this.percentage_counter = 50;
+}
+
+function UICasebook::concentrateResearch() {
+  if( this.hospital->canConcentrateResearch(this.selected_disease) ) {
+    this.hospital.research->concentrateResearch(this.selected_disease);
+  }
+}
+
+function UICasebook::onMouseDown(button, x, y) {
+  // Normal window operations if outside the disease list
+  if( x < 395 || x > 540 || y < 77 || y > 394 ) {
+    return UIFullscreen.onMouseDown(this, button, x, y);
+  }
+
+  var index_diff;
+  if( y < 203 ) {
+    index_diff = -7 + math.floor((y - 77) / 18);
+  } else if( y > 269 ) {
+    index_diff = math.floor((y - 269) / 18) + 1;
+  } else {
+    return;
+  }
+
+  // Clicking on a disease name scrolls to the disease
+  var new_index = this.selected_index + index_diff;
+  if( new_index >= 1 && new_index <= #this.names_sorted ) {
+    this.selected_index = new_index;
+    this.selected_disease = this.names_sorted[this.selected_index];
+    this.ui->playSound("pagetur2.wav");
+    this->updateIcons();
+  }
+}
+
+function UICasebook::onMouseWheel(x, y) {
+  if( ! UIFullscreen.onMouseWheel(this, x, y) ) {
+    if( this->hitTest(this.cursor_x, this.cursor_y) ) {
+      if( y > 0 ) {
+        this->scrollUp();
+        return true;
+      } else {
+        this->scrollDown();
+        return true;
+      }
+    }
+    return false;
+  } else {
+    return true;
+  }
+}
+
+function UICasebook::onTick() {
+  // Decrease counter for showing percentage of cure price, if applicable
+  if( this.percentage_counter ) {
+    this.percentage_counter = this.percentage_counter - 1;
+    if( this.percentage_counter <= 0 ) {
+      this.percentage_counter = false;
+    }
+  }
+  return UIFullscreen.onTick(this);
+}

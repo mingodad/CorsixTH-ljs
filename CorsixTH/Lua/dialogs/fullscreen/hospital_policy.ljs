@@ -1,0 +1,234 @@
+/* Copyright (c) 2009 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Hospital policy fullscreen window (set staff tiredness and patient cure thresholds, etc.).
+class ("UIPolicy") (UIFullscreen);
+
+//-@type UIPolicy
+var UIPolicy = _G["UIPolicy"];
+
+function UIPolicy::UIPolicy(ui, disease_selection) {
+  this->UIFullscreen(ui);
+  var gfx = ui.app.gfx;
+  if( ! pcall(function() {
+    this.background = gfx->loadRaw("Pol01V", 640, 480);
+    var palette = gfx->loadPalette("QData", "Pol01V.pal");
+    palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    this.panel_sprites = gfx->loadSpriteTable("QData", "Pol02V", true, palette);
+    this.label_font = gfx->loadFont("QData", "Font74V", false, palette);
+    this.text_font = gfx->loadFont("QData", "Font105V", false, palette);
+  }) ) {
+    ui->addWindow(UIInformation(ui, {_S.errors.dialog_missing_graphics}));
+    this->close();
+    return;
+  }
+
+  var hosp = ui.hospital;
+  this.hospital = hosp;
+
+  var /*persistable:hospital_policy_allow_staff*/ function allowStaff(name, state, btn) {
+    if( name == "Allow" ) {
+      if( this.prohibit_button.toggled ) { // Changing setting from prohibit to allow
+        hosp.policies["staff_allowed_to_move"] = true;
+        this.prohibit_button->toggle();
+      } else { // Already allowed, toggle again
+        this.allow_button->toggle();
+      }
+    } else { // Clicking the prohibit button
+      if( this.allow_button.toggled ) { // Changing setting from allow to prohibit
+        hosp.policies["staff_allowed_to_move"] = false;
+        this.allow_button->toggle();
+      } else { // Already prohibited, toggle again
+        this.prohibit_button->toggle();
+      }
+    }
+  }
+
+  // Buttons
+  this->addPanel(0, 607, 447)->makeButton(0, 0, 26, 26, 6, this.close)
+      ->setTooltip(_S.tooltip.policy.close);
+
+  this.allow_button = this->addPanel(0, 348, 379)
+      ->makeToggleButton(0, 0, 48, 17, 4, allowStaff, "Allow")
+      ->setTooltip(_S.tooltip.policy.staff_leave); // Allow staff to move
+
+  this.prohibit_button = this->addPanel(0, 395, 379)
+      ->makeToggleButton(0, 0, 48, 17, 5, allowStaff, "Prohibit")
+      ->setTooltip(_S.tooltip.policy.staff_stay); // Prohibit staff to move
+
+  if( this.hospital.policies["staff_allowed_to_move"] ) {
+    this.allow_button->toggle();
+  } else {
+    this.prohibit_button->toggle();
+  }
+
+  // Slider positions
+  var guess     = 129 + math.floor(hosp.policies["guess_cure"] * 299);
+  var home      = 129 + math.floor(hosp.policies["send_home"] * 299);
+  var stop      = 124 + math.floor((hosp.policies["stop_procedure"] - 1) * 299);
+  var staffroom = 149 + math.floor(hosp.policies["goto_staffroom"] * 250);
+
+  // Sliders
+  this.sliders = {};
+  this.sliders["guess_cure"] = this->addPanel(2, guess, 119, 82, 44);
+  this.sliders["send_home"] = this->addPanel(1, home, 135, 82, 28);
+  this.sliders["stop_procedure"] = this->addPanel(3, stop, 210, 92, 28);
+  this.sliders["goto_staffroom"] = this->addPanel(3, staffroom, 285, 92, 28);
+
+  this.sliders["guess_cure"].min_x = home;
+  this.sliders["guess_cure"].total_min_x = 129; // Needed to get the correct value set when windows is closed.
+  this.sliders["guess_cure"].max_x = 428;
+  this.sliders["send_home"].min_x = 129;
+  this.sliders["send_home"].max_x = guess;
+  this.sliders["send_home"].total_max_x = 428;
+  this.sliders["stop_procedure"].min_x = 124;
+  this.sliders["stop_procedure"].max_x = 423;
+  this.sliders["stop_procedure"].addition = true; // This value goes from 1 to 2.
+  this.sliders["goto_staffroom"].min_x = 149;
+  this.sliders["goto_staffroom"].max_x = 399;
+
+  // Z order of the sliders.
+  // The small 'send_home' slider must be tested first in 'self:panelHit',
+  // to ensure it can always be moved, even if the big 'guess_cure' is at the
+  // same position.
+  this.sliders_z = {this.sliders["send_home"], this.sliders["guess_cure"],
+      this.sliders["stop_procedure"], this.sliders["goto_staffroom"]};
+
+  // Tooltips for slider bars
+  this->makeTooltip(_S.tooltip.policy.diag_procedure,   161, 119, 479, 174);
+  this->makeTooltip(_S.tooltip.policy.diag_termination, 161, 210, 479, 249);
+  this->makeTooltip(_S.tooltip.policy.staff_rest,       161, 285, 479, 324);
+}
+
+function UIPolicy::draw(canvas, x, y) {
+  this.background->draw(canvas, this.x + x, this.y + y);
+  UIFullscreen.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+
+  var text = this.text_font;
+  var label = this.label_font;
+
+  // Labels on the panels
+  var added_x = this.sliders["send_home"].x;
+  var added_y = this.sliders["send_home"].y;
+  label->draw(canvas, _S.policy.sliders.send_home, x + added_x, y + added_y + 2, 82, 0);
+
+  added_x = this.sliders["guess_cure"].x;
+  added_y = this.sliders["guess_cure"].y;
+  label->draw(canvas, _S.policy.sliders.guess, x + added_x, y + added_y + 2, 82, 0);
+
+  added_x = this.sliders["stop_procedure"].x;
+  added_y = this.sliders["stop_procedure"].y;
+  label->draw(canvas, _S.policy.sliders.stop, x + added_x, y + added_y + 2, 92, 0);
+
+  added_x = this.sliders["goto_staffroom"].x;
+  added_y = this.sliders["goto_staffroom"].y;
+  label->draw(canvas, _S.policy.sliders.staff_room, x + added_x, y + added_y + 2, 92, 0);
+
+  // All other text
+  text->draw(canvas, _S.policy.header,            x + 160, y + 78, 300, 0);
+  text->draw(canvas, _S.policy.diag_procedure,    x + 161, y + 100);
+  text->draw(canvas, _S.policy.diag_termination,  x + 161, y + 181);
+  text->draw(canvas, _S.policy.staff_rest,        x + 161, y + 262);
+  text->draw(canvas, _S.policy.staff_leave_rooms, x + 161, y + 374);
+}
+
+function UIPolicy::onMouseMove(x, y, dx, dy) {
+  var repaint = UIFullscreen.onMouseMove(this, x, y, dx, dy);
+  if( this.moving_panel ) { // A slider is being moved.
+    var p = this.moving_panel;
+    this.moved_x = this.moved_x + dx;
+    var new_x = this.moved_x + this.down_x - this.moving_panel.w / 2 - this.offset;
+    if( new_x > p.min_x ) {
+      if( new_x < p.max_x ) {
+        this.moving_panel.x = new_x;
+        this.position_x = new_x;
+      } else {
+        this.moving_panel.x = this.moving_panel.max_x;
+        this.position_x = this.moving_panel.max_x;
+      }
+    } else {
+      this.moving_panel.x = this.moving_panel.min_x;
+      this.position_x = this.moving_panel.min_x;
+    }
+    repaint = true;
+  }
+  return repaint;
+}
+
+function UIPolicy::onMouseDown(code, x, y) {
+  if( code == "left" ) {
+    this.moving_panel = this->panelHit(x, y);
+    if( this.moving_panel ) {
+      this.down_x = x;
+      this.offset = x - (this.moving_panel.x + this.moving_panel.w / 2);
+      this.moved_x = 0;
+      this.position_x = this.moving_panel.x;
+      return true;
+    }
+  }
+  return UIFullscreen.onMouseDown(this, code, x, y);
+}
+
+function UIPolicy::onMouseUp(code, x, y) {
+  if( this.moving_panel ) {
+    if( this.moving_panel == this.sliders["guess_cure"] ) {
+      this.sliders["send_home"].max_x = this.position_x;
+    } else if( this.moving_panel == this.sliders["send_home"] ) {
+      this.sliders["guess_cure"].min_x = this.position_x;
+    }
+  }
+  this.moving_panel = null;
+  return UIFullscreen.onMouseUp(this, code, x, y);
+}
+
+//! Detect which slider is clicked by the mouse.
+//!param x (int) X position of the mouse.
+//!param y (int) Y position of the mouse.
+//!return Slider that was detected at the given position, or nil
+function UIPolicy::panelHit(x, y) {
+  for( _, panel in ipairs(this.sliders_z) ) {
+    if( x > panel.x && y > panel.y && x < panel.x + panel.w && y < panel.y + panel.h ) {
+      return panel;
+    }
+  }
+  return null;
+}
+
+//! Close the window.
+function UIPolicy::close() {
+  // Save new slider positions in the hospital policies again for the next use.
+  for( key, s in pairs(this.sliders || {}) ) {
+    var divider = (s.total_max_x || s.max_x) - (s.total_min_x || s.min_x);
+    var number = (s.addition && 1 || 0);
+    this.hospital.policies[key] = number + (s.x - (s.total_min_x || s.min_x))/divider;
+  }
+  UIFullscreen.close(this);
+  this.ui->getWindow(UIBottomPanel)->updateButtonStates();
+}
+
+function UIPolicy::afterLoad(old, new) {
+  UIFullscreen.afterLoad(this, old, new);
+
+  if( old < 116 ) { // Ensure panelHit tests the sliders in the right order.
+    this.sliders_z = {this.sliders["send_home"], this.sliders["guess_cure"],
+        this.sliders["stop_procedure"], this.sliders["goto_staffroom"]};
+  }
+}

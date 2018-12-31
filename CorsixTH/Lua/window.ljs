@@ -1,0 +1,1866 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+corsixth.require("persistance");
+
+//! Base class for user-interface dialogs.
+class ("Window");
+
+//-@type Window
+var Window = _G["Window"];
+
+// NB: pressed mouse buttons are denoted with a "mouse_" prefix in buttons_down,
+// i.e. mouse_left, mouse_middle, mouse_right
+Window.buttons_down = permanent("Window.buttons_down") ({});
+
+function Window::Window() {
+  this.x = 0;
+  this.y = 0;
+
+  this.cursor_x = 0;
+  this.cursor_y = 0;
+
+  this.panels = {
+  };
+  this.buttons = {
+  };
+  this.tooltip_regions = {
+  };
+  this.scrollbars = {
+  };
+  this.textboxes = { // list of textboxes in that window. NB: (Game)UI also uses this.
+  };                  // Take care not to handle things twice as UI is subclass of window!
+  this.key_handlers = {/*a set*/};
+  this.windows = false; // => {} when first window added
+  this.active_button = false;
+  this.blinking_button = false;
+  this.blink_counter = 0;
+  this.panel_sprites = false;
+  this.visible = true;
+  this.draggable = true;
+}
+
+// Sets the window's onscreen position. Each of x and y can be:
+// Integers >= 0 - Absolute pixel positions of top/left edge of window relative
+//                 to top/left edge of screen
+// Integers < 0 - Absolute pixel positions of right/bottom edge of window
+//                relative to right/bottom edge of screen. Use -0.1 to mean -0.
+// Reals in [0, 1) -
+function Window::setPosition(x, y) {
+  // Save values to recalculate x and y on screen resolution change
+  this.x_original = x;
+  this.y_original = y;
+  // Convert x and y to absolute pixel positions with regard to top/left
+  var w, h = TheApp.config.width, TheApp.config.height;
+  if( x < 0 ) {
+    x = math.ceil(w - this.width + x);
+  } else if( x < 1 ) {
+    x = math.floor((w - this.width) * x + 0.5);
+  }
+  if( y < 0 ) {
+    y = math.ceil(h - this.height + y);
+  } else if( y < 1 ) {
+    y = math.floor((h - this.height) * y + 0.5);
+  }
+  this.x = x;
+  this.y = y;
+}
+
+// Sets the window's default onscreen position and onscreen position.
+// The given x and y are interpreted as for setPosition(x, y), and are the
+// default position for the window. If the user has previously repositioned a
+// window of the same type, then setDefaultPosition() will set the window to
+// that previous position, otherwise it sets it to the default position.
+function Window::setDefaultPosition(x, y) {
+  if( this.ui ) {
+    var config = this.ui.app.runtime_config.window_position;
+    if( config ) {
+      config = config[this->getSavedWindowPositionName()];
+      if( config ) {
+        return this->setPosition(config.x, config.y);
+      }
+    }
+  }
+  return this->setPosition(x, y);
+}
+
+// Called after the resolution of the game window changes
+function Window::onChangeResolution() {
+  if( this.x_original && this.y_original ) {
+    this->setPosition(this.x_original, this.y_original);
+  }
+}
+
+// Called before the window is closed
+function Window::close() {
+  if( this.dragging ) {
+    this.dragging = false;
+    this.ui.drag_mouse_move = null;
+  }
+  if( this.parent ) {
+    this.parent->removeWindow(this);
+  }
+  for( key in pairs(this.key_handlers) ) {
+    this.ui->removeKeyHandler(key, this);
+  }
+  for( _, box in pairs(this.textboxes) ) {
+    this.ui->unregisterTextBox(box);
+  }
+  this.closed = true;
+}
+
+function Window::addKeyHandler(key, handler, ...) {
+  this.ui->addKeyHandler(key, this, handler, ...);
+  this.key_handlers[key] = true;
+}
+
+//!param keys (string or table) The key or a list containing the key & its modifiers,
+// previously passed to Window:addKeyHandler(keys).
+function Window::removeKeyHandler(keys) {
+  this.ui->removeKeyHandler(keys, this);
+}
+
+//! The basic component which makes up most `Window`s.
+//! The visual parts of most ingame dialogs are sprites from a sprite sheet.
+// A `Panel` is an instance of a particular sprite, consisting of a sprite
+// index and a position. It is advantageous to construct dialogs out of panels
+// (using `Window:addPanel`) as the common operations on panels (like drawing
+// them and hit-testing against them) are implemented in the `Window` class,
+// thus reducing the amount of work that each individual dialog has to do.
+class ("Panel");
+
+//-@type Panel
+var Panel = _G["Panel"];
+
+// !dummy
+function Panel::Panel() {
+  this.window = null;
+  this.x = null;
+  this.y = null;
+  this.w = null;
+  this.h = null;
+  this.colour = null;
+  this.custom_draw = null;
+  this.visible = null;
+}
+
+var panel_mt = permanent("Window.<panel_mt>", getmetatable(Panel()));
+
+function Panel::makeButton(...) {
+  return this.window->makeButtonOnPanel(this, ...);
+}
+
+function Panel::makeToggleButton(...) {
+  return this.window->makeButtonOnPanel(this, ...)->makeToggle();
+}
+
+function Panel::makeRepeatButton(...) {
+  return this.window->makeButtonOnPanel(this, ...)->makeRepeat();
+}
+
+function Panel::makeScrollbar(...) {
+  return this.window->makeScrollbarOnPanel(this, ...);
+}
+
+function Panel::makeTextbox(...) {
+  return this.window->makeTextboxOnPanel(this, ...);
+}
+
+var function sanitize(colour) {
+  if( colour > 255 ) {
+    colour = 255;
+  } else if( colour < 0 ) {
+    colour = 0;
+  }
+  return colour;
+}
+
+/* Set the colour of a panel
+! Note: This works only with ColourPanel and BevelPanel, not normal (sprite) panels.
+!param col (table) Colour given as a table with three fields red, green and blue, each an integer value in [0, 255].
+*/
+function Panel::setColour(col) {
+  this.colour = this.colour && TheApp.video->mapRGB(col.red, col.green, col.blue);
+  this.highlight_colour = this.highlight_colour && TheApp.video->mapRGB(
+    sanitize(col.red + 40),
+    sanitize(col.green + 40),
+    sanitize(col.blue + 40));
+  this.shadow_colour = this.shadow_colour && TheApp.video->mapRGB(
+    sanitize(col.red - 40),
+    sanitize(col.green - 40),
+    sanitize(col.blue - 40));
+  this.disabled_colour = this.disabled_colour && TheApp.video->mapRGB(
+    sanitize(math.floor((col.red + 100) / 2)),
+    sanitize(math.floor((col.green + 100) / 2)),
+    sanitize(math.floor((col.blue + 100) / 2)));
+  return this;
+}
+
+// Specify a tooltip to be displayed when hovering this panel.
+// x and y are optional position of bottom left of the tooltip.
+// If not specified, will default to mouse position.
+function Panel::setTooltip(tooltip, x, y) {
+  this.tooltip = {
+    text = tooltip,
+    tooltip_x = x,
+    tooltip_y = y,
+  };
+  return this;
+}
+
+function Panel::setDynamicTooltip(callback, x, y) {
+  this.tooltip = {
+    callback = callback,
+    tooltip_x = x,
+    tooltip_y = y,
+  };
+  return this;
+}
+
+//! Specify a label to be drawn on top of the panel.
+// Note: This works only with ColourPanel and BevelPanel, not normal (sprite) panels.
+//!param label (string) The text to be drawn on top of the label.
+//!param font (font) [optional] The font to use. Default is Font01V in QData.
+//!param align (string) [optional] Alignment for non-multiline labels (multiline is always left)
+//!  can be either of "left", "center", "right"
+function Panel::setLabel(label, font, align) {
+  this.label = label || "";
+  this.label_font = font || this.label_font || TheApp.gfx->loadFont("QData", "Font01V");
+  this.align = align || this.align;
+  return this;
+}
+
+//! Specifies whether auto clip (clipping text at the end so it fits) is enabled for this panel
+//!param mode (boolean) true to activate, false to deactivate.
+function Panel::setAutoClip(mode) {
+  this.auto_clip = mode;
+  return this;
+}
+
+//! Checks if a given line drawn with the panel's label font would be longer than the given limit
+//! and if so, shortens it enough to fit including "..." at the end
+//!param line (string) the line to modify
+//!param limit (int) the maximum length in pixels the line should have
+//!return the possibly modified line
+function Panel::clipLine(line, limit) {
+  var _, last_x = this.label_font->draw(null, line, 0, 0);
+  if( last_x > limit ) {
+    limit = limit - this.label_font->sizeOf("..._");
+    while( last_x > limit ) {
+      line = line->sub(1, -2);
+      _, last_x = this.label_font->draw(null, line, 0, 0);
+    }
+    line = line .. "...";
+  }
+  return line;
+}
+
+//! Draw function for the label on a panel
+//!param canvas The canvas to draw on (can be nil for test)
+//!param x x position to start drawing on
+//!param y y position to start drawing on
+//!param limit (nil or {int, int}) limit after which line and with character on that line to stop drawing
+//!return y and x end positions after drawing
+function Panel::drawLabel(canvas, x, y, limit) {
+  var text = this.label;
+  var multi_line = type(text) == "table";
+  var wrapped = ! this.auto_clip;
+  var center_y = false;
+
+  if( ! multi_line ) {
+    text = {text};
+    wrapped = false;
+    center_y = true;
+  }
+
+  var next_y = y + this.y + 1;
+  var last_x = x + this.x + 2;
+  for( i, line in ipairs(text) ) {
+    var old_y = next_y;
+    if( limit && limit[1] == i ) {
+      line = line->sub(1, limit[2]);
+    }
+    if( this.auto_clip ) {
+      line = this->clipLine(line, this.w - 4);
+    }
+
+    if( wrapped ) {
+      next_y, last_x = this.label_font->drawWrapped(canvas, line, x + this.x + 2, old_y, this.w - 4, this.align);
+    } else {
+      next_y, last_x = this.label_font->draw(canvas, line, x + this.x + 2, old_y, this.w - 4, center_y && this.h || 0, this.align);
+    }
+    if( ! line->find("%S") ) {
+      // Special handling for empty lines or lines with only space
+      next_y = this.label_font->draw(null, "A", x + this.x + 2, old_y, this.w - 4, center_y && this.h || 0, this.align);
+    }
+    if( limit && limit[1] == i ) {
+      break;
+    }
+  }
+  return next_y, last_x;
+}
+
+//! Set the position of a panel.
+//!param x (int) New horizontal position of the panel.
+//!param y (int) New vertical position of the panel.
+function Panel::setPosition(x, y) {
+  this.x = x;
+  this.y = y;
+}
+
+//! Set the size of a panel.
+//!param width (int) New width of the panel.
+//!param height (int) New height of the panel.
+function Panel::setSize(width, height) {
+  this.w = width;
+  this.h = height;
+}
+
+//! Set the visibility of the panel.
+//!param visibility (bool) New visibility of the panel.
+function Panel::setVisible(visibility) {
+  this.visible = visibility;
+}
+
+/* Add a `Panel` to the window.
+! Panels form the basic building blocks of most windows. A panel is a small
+bitmap coupled with a position, and by combining several panels, a window can
+be made. By using panels to construct windows, all of the common tasks like
+drawing and hit-testing are provided for you by the base class methods, thus
+reducing the amount of code required elsewhere.
+!param sprite_index (integer) Index into the window's sprite table of the
+bitmap to be displayed.
+!param x (integer) The X pixel position to display the bitmap at.
+!param y (integer) The Y pixel position to display the bitmap at.
+!param w (integer, nil) If the panel is totally opaque, and the width of the
+panel (in pixels) is known, it should be specified here to speed up hit-tests.
+!param h (integer, nil) If the panel is totally opaque, and the height of the
+panel (in pixels) is known, it should be specified here to speed up hit-tests.
+*/
+function Window::addPanel(sprite_index, x, y, w, h) {
+  var panel = setmetatable({
+    window = this,
+    x = x,
+    y = y,
+    w = w,
+    h = h,
+    sprite_index = sprite_index,
+    visible = true,
+  }, panel_mt);
+  this.panels[#this.panels + 1] = panel;
+  return panel;
+}
+
+function Window::removeAllPanels() {
+  this.panels = {};
+  this.buttons = {}; // Buttons cannot live without a panel
+}
+
+var /*persistable: window_panel_colour_draw*/ function panel_colour_draw(panel, canvas, x, y) {
+  canvas->drawRect(panel.colour, x + panel.x, y + panel.y, panel.w, panel.h);
+  if( panel.label ) {
+    panel->drawLabel(canvas, x, y);
+  }
+}
+
+/* Add a solid-colour `Panel` to the window.
+! A solid-colour panel is like a normal panel, expect it displays a solid
+colour rather than a bitmap.
+!param x (integer) The X pixel position to start the panel at.
+!param y (integer) The Y pixel position to start the panel at.
+!param w (integer) The width of the panel, in pixels.
+!param h (integer) The height of the panel, in pixels.
+!param r (integer) Value in [0, 255] giving the red component of the colour.
+!param g (integer) Value in [0, 255] giving the green component of the colour.
+!param b (integer) Value in [0, 255] giving the blue component of the colour.
+*/
+function Window::addColourPanel(x, y, w, h, r, g, b) {
+  var panel = setmetatable({
+    window = this,
+    x = x,
+    y = y,
+    w = w,
+    h = h,
+    colour = TheApp.video->mapRGB(r, g, b),
+    custom_draw = panel_colour_draw,
+    visible = true,
+  }, panel_mt);
+  this.panels[#this.panels + 1] = panel;
+  return panel;
+}
+
+var /*persistable: window_panel_bevel_draw*/ function panel_bevel_draw(panel, canvas, x, y) {
+  if( panel.lowered ) {
+    canvas->drawRect(panel.highlight_colour, x + panel.x, y + panel.y, panel.w, panel.h);
+    canvas->drawRect(panel.shadow_colour, x + panel.x, y + panel.y, panel.w - 1, panel.h - 1);
+    canvas->drawRect(panel.colour, x + panel.x + 1, y + panel.y + 1, panel.w - 2, panel.h - 2);
+  } else {
+    canvas->drawRect(panel.shadow_colour, x + panel.x + 1, y + panel.y + 1, panel.w - 1, panel.h - 1);
+    canvas->drawRect(panel.highlight_colour, x + panel.x, y + panel.y, panel.w - 1, panel.h - 1);
+    canvas->drawRect(panel.colour, x + panel.x + 1, y + panel.y + 1, panel.w - 2, panel.h - 2);
+  }
+  if( panel.label ) {
+    panel->drawLabel(canvas, x, y);
+  }
+}
+
+/* Add a beveled `Panel` to the window.
+! A bevel panel is similar to a solid colour panel, except that it
+features a highlight and a shadow that makes it appear either lowered or raised.
+!param x (integer) The X pixel position to start the panel at.
+!param y (integer) The Y pixel position to start the panel at.
+!param w (integer) The width of the panel, in pixels.
+!param h (integer) The height of the panel, in pixels.
+!param colour (colour in form .red, .green and .blue) The colour for the panel.
+!param highlight_colour (colour in form .red, .green and .blue or nil) [optional] The colour for the highlight.
+!param shadow_colour (colour in form .red, .green and .blue or nil) [optional] The colour for the shadow.
+!param disabled_colour (colour in form .red, .green and .blue or nil) [optional] The colour for the disabled panel.
+*/
+function Window::addBevelPanel(x, y, w, h, colour, highlight_colour, shadow_colour, disabled_colour) {
+  highlight_colour = highlight_colour || {
+    red = sanitize(colour.red + 40),
+    green = sanitize(colour.green + 40),
+    blue = sanitize(colour.blue + 40),
+  };
+  shadow_colour = shadow_colour || {
+    red = sanitize(colour.red - 40),
+    green = sanitize(colour.green - 40),
+    blue = sanitize(colour.blue - 40),
+  };
+  disabled_colour = disabled_colour || {
+    red = sanitize(math.floor((colour.red + 100) / 2)),
+    green = sanitize(math.floor((colour.green + 100) / 2)),
+    blue = sanitize(math.floor((colour.blue + 100) / 2)),
+  };
+
+  var panel = setmetatable({
+    window = this,
+    x = x,
+    y = y,
+    w = w,
+    h = h,
+    colour = TheApp.video->mapRGB(colour.red, colour.green, colour.blue),
+    highlight_colour = TheApp.video->mapRGB(highlight_colour.red, highlight_colour.green, highlight_colour.blue),
+    shadow_colour = TheApp.video->mapRGB(shadow_colour.red, shadow_colour.green, shadow_colour.blue),
+    disabled_colour = TheApp.video->mapRGB(disabled_colour.red, disabled_colour.green, disabled_colour.blue),
+    custom_draw = panel_bevel_draw,
+    visible = true,
+    lowered = false,
+  }, panel_mt);
+  this.panels[#this.panels + 1] = panel;
+  return panel;
+}
+
+function Window::addWindow(window) {
+  if( window.closed ) {
+    return;
+  }
+  if( ! this.windows ) {
+    this.windows = {};
+  }
+  window.parent = this;
+  if( window.on_top ) {
+    // As self.windows array is ordered from top to bottom and drawn by the end, a "On Top" window has be added at start
+    table.insert(this.windows, 1, window);
+  } else {
+    // Normal windows, are added in the first position after on_top windows
+    var pos = false;
+    for( i = 1, #this.windows ) {
+      if( ! this.windows[i].on_top ) {
+        pos = i;
+        break;
+      }
+    }
+    pos = pos || #this.windows + 1;
+    table.insert(this.windows, pos, window);
+  }
+}
+
+function Window::removeWindow(window) {
+  if( this.windows ) {
+    for( n = 1, #this.windows ) {
+      if( this.windows[n] == window ) {
+        if( #this.windows == 1 ) {
+          this.windows = false;
+        } else {
+          table.remove(this.windows, n);
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Searches (direct) child windows for window of the given class, and returns
+// one (or nil if there weren't any at all).
+// !param window_class (class) The class of window to search for.
+function Window::getWindow(window_class) {
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      if( class.is(window, window_class) ) {
+        return window;
+      }
+    }
+  }
+}
+
+// Searches (direct) child windows for window of the given class, and returns
+// a (potentially empty) list of matching windows.
+// !param window_class (class) The class of window to search for.
+function Window::getWindows(window_class) {
+  var matching_windows = {};
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      if( class.is(window, window_class) ) {
+        matching_windows[#matching_windows+1] = window;
+      }
+    }
+  }
+  return matching_windows;
+}
+
+//! A region of a `Panel` which causes some action when clicked.
+class ("Button");
+
+//-@type Button
+var Button = _G["Button"];
+
+//!dummy
+function Button::Button() {
+  this.ui = null;
+  this.is_toggle = null;
+  this.is_repeat = null;
+  this.x = null;
+  this.y = null;
+  this.r = null;
+  this.b = null;
+  this.panel_for_sprite = null;
+  this.sprite_index_normal = null;
+  this.sprite_index_disabled = null;
+  this.sprite_index_active = null;
+  this.panel_lowered_normal = null;
+  this.panel_lowered_active = null;
+  this.on_click = null;
+  this.on_click_self = null;
+  this.on_rightclick = null;
+  this.enabled = null;
+}
+
+var button_mt = permanent("Window.<button_mt>", getmetatable(Button()));
+
+function Button::setDisabledSprite(index) {
+  this.sprite_index_disabled = index;
+  return this;
+}
+
+//! Enable or disable a button.
+//!param enable (boolean) Whether to enable (true) or disable (false) the button.
+function Button::enable(enable) {
+  if( enable && ! this.enabled ) {
+    this.enabled = true;
+    this.panel_for_sprite.sprite_index = this.sprite_index_normal;
+    if( this.panel_for_sprite.colour_backup ) {
+      this.panel_for_sprite.colour = this.panel_for_sprite.colour_backup;
+    }
+  }
+  if( ! enable && this.enabled ) {
+    this.enabled = false;
+    this.panel_for_sprite.sprite_index = this.sprite_index_disabled;
+    if( this.panel_for_sprite.disabled_colour ) {
+      this.panel_for_sprite.colour_backup = this.panel_for_sprite.colour;
+      this.panel_for_sprite.colour = this.panel_for_sprite.disabled_colour;
+    }
+  }
+  return this;
+}
+
+function Button::makeToggle() {
+  this.is_toggle = true;
+  this.is_repeat = false;
+  this.toggled = false;
+  return this;
+}
+
+function Button::makeRepeat() {
+  this.is_repeat = true;
+  this.is_toggle = false;
+  this.toggled = false;
+  return this;
+}
+
+//! Flip the toggle state of the button (on -> off, or off -> on).
+function Button::toggle() {
+  this.sprite_index_normal, this.sprite_index_active =
+    this.sprite_index_active, this.sprite_index_normal;
+  this.panel_lowered_active, this.panel_lowered_normal =
+    this.panel_lowered_normal, this.panel_lowered_active;
+  this.panel_for_sprite.sprite_index = this.sprite_index_normal;
+  this.panel_for_sprite.lowered = this.panel_lowered_normal;
+  this.toggled = ! this.toggled;
+  return this.toggled;
+}
+
+//! Set the toggle state of the button to the provided state.
+//!param state (boolean) Desired state of the toggle button.
+function Button::setToggleState(state) {
+  if( this.toggled != state ) {
+    this->toggle();
+  }
+  return this;
+}
+
+function Button::preservePanel() {
+  var window = this.panel_for_sprite.window;
+  this.panel_for_sprite = window->addPanel(0, this.x, this.y);
+  this.sprite_index_normal = 0;
+  return this;
+}
+
+function Button::setSound(name) {
+  this.sound = name;
+  return this;
+}
+
+var /*persistable:window_drag_round*/ function round(value, amount) {
+  return amount * math.floor(value / amount + 0.5);
+}
+
+// Specify a tooltip to be displayed when hovering this button.
+// x and y are optional position of bottom left of the tooltip.
+// If not specified, will default to top center of button.
+function Button::setTooltip(tooltip, x, y) {
+  this.tooltip = {
+    text = tooltip,
+    tooltip_x = x || round((this.x + this.r) / 2, 1),
+    tooltip_y = y || this.y,
+  };
+  return this;
+}
+
+function Button::setDynamicTooltip(callback, x, y) {
+  this.tooltip =  {
+    callback = callback,
+    tooltip_x = x || round((this.x + this.r) / 2, 1),
+    tooltip_y = y || this.y,
+  };
+  return this;
+}
+
+//! Called whenever a click on the button should be handled. This depends on the type of button.
+//! Normally this is called when a MouseUp occurs over the button (if the MouseDown occurred over
+//! this or another button). However for repeat buttons, it is called once on MouseDown and, after
+//! a short delay, repeatedly.
+//!param mouse_button (string) either "left" or "right"
+function Button::handleClick(mouse_button) {
+  var arg = null;
+  if( this.is_toggle ) {
+    arg = this->toggle();
+  }
+  if( this.sound ) {
+    this.ui->playSound(this.sound);
+  }
+  var callback = mouse_button == "left" && this.on_click || this.on_rightclick;
+  if( callback ) {
+    callback(this.on_click_self, arg, this);
+  } else {
+    if( mouse_button == "left" ) {
+      print("Warning: No handler for button click");
+      this.on_click = /*persistable:button_on_click_handler_stub*/ function() { };
+    }
+  }
+}
+
+//! Set the position of a button.
+//!param x (int) New horizontal position of the button.
+//!param y (int) New vertical position of the button.
+function Button::setPosition(x, y) {
+  this.panel_for_sprite->setPosition(x, y);
+  this.r = this.r - this.x + x;
+  this.b = this.b - this.y + y;
+  this.x = x;
+  this.y = y;
+  if( this.tooltip ) {
+    this.tooltip.tooltip_x = math.round((this.x + this.r) / 2, 1);
+    this.tooltip.tooltip_y = this.y;
+  }
+}
+
+//! Set the size of a button.
+//!param width (int) New width of the button.
+//!param height (int) New height of the button.
+function Button::setSize(width, height) {
+  this.panel_for_sprite->setSize(width, height);
+  this.r = this.x + width;
+  this.b = this.y + height;
+  if( this.tooltip ) {
+    this.tooltip.tooltip_x = math.round((this.x + this.r) / 2, 1);
+    this.tooltip.tooltip_y = this.y;
+  }
+}
+
+//! Set the visibility of the button.
+//!param visibility (bool) New visibility of the button.
+function Button::setVisible(visibility) {
+  this.panel_for_sprite->setVisible(visibility);
+}
+
+//! Convenience function to allow setLabel to be called on a button, not only its panel.
+//! see Panel:setLabel
+function Button::setLabel(label, font, align) {
+  this.panel_for_sprite->setLabel(label, font, align);
+  return this;
+}
+
+/* Convert a static panel into a clickable button.
+!param panel (Panel) The panel to convert into a button.
+!param x (integer) The X co-ordinate of the clickable rectangle on the panel.
+!param y (integer) The Y co-ordinate of the clickable rectangle on the panel.
+!param w (integer) The width of the clickable rectangle on the panel.
+!param h (integer) The height of the clickable rectangle on the panel.
+!param sprite (integer) An index into the window's sprite sheet. The panel will
+display this sprite when the button is being pressed.
+!param on_click (function) The function to be run when the user left-clicks the
+button. Takes three arguments: `on_click_self`, the toggle state (nil for
+normal buttons, true/false for toggle buttons), the button itself.
+!param on_click_self (function, nil) The first value to pass to `on_click`. If
+nil or not given, then the window is passed as the first argument.
+!param on_rightclick (function, nil) The function to be called when the user
+right-clicks the button.
+*/
+function Window::makeButtonOnPanel(panel, x, y, w, h, sprite, on_click, on_click_self, on_rightclick) {
+  x = x + panel.x;
+  y = y + panel.y;
+  var button = setmetatable({
+    ui = this.ui,
+    is_toggle = false,
+    is_repeat = false,
+    x = x,
+    y = y,
+    r = x + w,
+    b = y + h,
+    panel_for_sprite = panel,
+    sprite_index_normal = panel.sprite_index,
+    sprite_index_disabled = panel.sprite_index,
+    sprite_index_active = sprite,
+    on_click = on_click,
+    on_click_self = on_click_self || this,
+    on_rightclick = on_rightclick,
+    enabled = true,
+    panel_lowered_normal = false,
+    panel_lowered_active = true,
+  }, button_mt);
+  if( this.ui && on_click == this.close ) {
+    button.sound = "no4.wav";
+  } else if( this.default_button_sound ) {
+    button.sound = this.default_button_sound;
+  }
+  this.buttons[#this.buttons + 1] = button;
+  return button;
+}
+
+//! A window element used to scroll in lists
+class ("Scrollbar");
+
+//-@type Scrollbar
+var Scrollbar = _G["Scrollbar"];
+
+//!dummy
+function Scrollbar::Scrollbar() {
+  this.base = null;
+  this.slider = null;
+  this.min_value = null;
+  this.max_value = null;
+  this.value = null;
+  this.page_size = null;
+  this.direction = null;
+  this.visible = null;
+}
+
+function Scrollbar::setRange(min_value, max_value, page_size, value) {
+  page_size = math.min(page_size, max_value - min_value + 1); // page size must be number of elements at most
+  value = math.min(value || min_value, math.max(min_value, max_value - page_size + 1));
+
+  this.min_value = min_value;
+  this.max_value = max_value;
+  this.page_size = page_size;
+  this.value = value;
+
+  var slider = this.slider;
+  slider.w = slider.max_w;
+  slider.h = slider.max_h;
+  slider.max_x = slider.min_x + slider.max_w - slider.w;
+  slider.max_y = slider.min_y + slider.max_h - slider.h;
+
+  if( this.direction == "y" ) {
+    slider.h = math.ceil((page_size / (max_value - min_value + 1)) * slider.max_h);
+    slider.max_y = slider.min_y + slider.max_h - slider.h;
+    slider.y = math.floor((value - min_value) / (max_value - min_value - page_size + 2) * (slider.max_y - slider.min_y) + slider.min_y);
+  } else {
+    slider.w = math.ceil((page_size / (max_value - min_value + 1)) * slider.max_w);
+    slider.max_x = slider.min_x + slider.max_w - slider.w;
+    slider.x = math.floor((value - min_value) / (max_value - min_value - page_size + 2) * (slider.max_x - slider.min_x) + slider.min_x);
+  }
+
+  return this;
+}
+
+//! Get the pixel position of the slider in the axis which the slider can move
+function Scrollbar::getXorY() {
+  return this.slider[this.direction];
+}
+
+//! Set the pixel position of the slider in the axis which the slider can move
+function Scrollbar::setXorY(xy) {
+  var dir = this.direction;
+  var min, max;
+  if( dir == "x" ) {
+    min = this.slider.min_x;
+    max = this.slider.max_x;
+  } else {
+    min = this.slider.min_y;
+    max = this.slider.max_y;
+  }
+  if( xy < min ) {
+    xy = min;
+  }
+  if( xy > max ) {
+    xy = max;
+  }
+  this.slider[dir] = xy;
+  var old_value = this.value;
+  this.value = math.floor(((xy - min) / (max - min + 1)) * (this.max_value - this.min_value - this.page_size + 2)) + 1;
+  if( old_value != this.value ) {
+    this.callback();
+  }
+}
+
+var scrollbar_mt = permanent("Window.<scrollbar_mt>", getmetatable(Scrollbar()));
+
+/* Convert a static panel into a scrollbar.
+! Scrollbars consist of a base panel (the panel given as a parameter)
+and an additional slider panel (automatically created BevelPanel).
+!param panel (panel) The panel that will serve as the scrollbar base.
+!param slider_colour (colour in form .red, .green and .blue) The colour for the slider.
+!param callback (function) Function that is called whenever the slider position changes.
+!param min_value (integer) The minimum value the scrollbar can represent.
+!param max_value (integer) The maximum value the scrollbar can represent.
+!param page_size (integer) The amount of objects represented on one page.
+!param value (integer, nil) The current value, or min_value if not specified.
+*/
+function Window::makeScrollbarOnPanel(panel, slider_colour, callback, min_value, max_value, page_size, value) {
+  var slider = this->addBevelPanel(panel.x + 1, panel.y + 1, panel.w - 2, panel.h - 2, slider_colour);
+  var scrollbar = setmetatable({
+    base = panel,
+    slider = slider,
+    direction = "y",
+    callback = callback,
+    visible = true,
+    enabled = true,
+  }, scrollbar_mt);
+  slider.min_x = slider.x;
+  slider.min_y = slider.y;
+  slider.max_w = slider.w;
+  slider.max_h = slider.h;
+  scrollbar->setRange(min_value, max_value, page_size, value);
+  this.scrollbars[#this.scrollbars + 1] = scrollbar;
+
+  return scrollbar;
+}
+
+//! A window element used to enter text
+class ("Textbox");
+
+//-@type Textbox
+var Textbox = _G["Textbox"];
+
+//!dummy
+function Textbox::Textbox() {
+  this.panel = null;
+  this.confirm_callback = null;
+  this.abort_callback = null;
+  this.button = null;
+  this.text = null;
+  this.allowed_input = null;
+  this.char_limit = null;
+  this.visible = null;
+  this.enabled = null;
+  this.active = null;
+  this.cursor_counter = null;
+  this.cursor_state = null;
+  this.cursor_pos = null;
+}
+
+var textbox_mt = permanent("Window.<textbox_mt>", getmetatable(Textbox()));
+
+function Textbox::onTick() {
+  if( this.active ) {
+    this.cursor_counter = this.cursor_counter + 1;
+    if( this.cursor_counter >= 40 ) {
+      this.cursor_state = true;
+      this.cursor_counter = this.cursor_counter - 40;
+    } else if( this.cursor_counter >= 20 ) {
+      this.cursor_state = false;
+    }
+  }
+}
+
+function Textbox::drawCursor(canvas, x, y) {
+  if( this.cursor_state ) {
+    var col = TheApp.video->mapRGB(255, 255, 255);
+    var cursor_y, cursor_x = this.panel->drawLabel(null, x, y, this.cursor_pos);
+    var w, _ = this.panel.label_font->sizeOf("0");
+    if( this.panel.align == null || this.panel.align == "center" ) {
+      var _, text_x = this.panel->drawLabel(null, x, y, {this.cursor_pos[1], #this.text});
+      cursor_x = text_x - (text_x - cursor_x) * 2;
+    }
+    cursor_y = cursor_y - 3;
+    // Add x separation, but only if there was actually some text in this line.
+    if( this.text[this.cursor_pos[1]] != "" ) {
+      cursor_x = cursor_x + 1; // TODO font:getSeparation?
+    }
+    canvas->drawRect(col, cursor_x, cursor_y, w, 1);
+  }
+}
+
+//! Set the box to not active and run confirm callback, if any
+function Textbox::confirm() {
+  this->setActive(false);
+  if( this.confirm_callback ) {
+    this.confirm_callback();
+  }
+}
+
+//! Set the box to not active and run abort callback, if any
+function Textbox::abort() {
+  this->setActive(false);
+  if( this.abort_callback ) {
+    this.abort_callback();
+  }
+}
+
+//! Set the textbox active status to true or false, taking care of any
+// additional things that need to be done: deactivate any other textboxes,
+// handle blinking cursor, keyboard repeat on/off, set button state accordingly
+//!param active (boolean) whether to activate (true) or deactivate (false) the box
+function Textbox::setActive(active) {
+  var ui = this.panel.window.ui;
+  if( active ) {
+    // Unselect any other textbox
+    for( _, textbox in ipairs(ui.textboxes) ) {
+      if( textbox != this && textbox.active ) {
+        textbox->abort();
+      }
+    }
+    this.cursor_counter = 0;
+    this.cursor_state = true;
+    this.cursor_pos[1] = type(this.text) == "table" && #this.text || 1;
+    this.cursor_pos[2] = type(this.text) == "table" && string.len(this.text[#this.text]) || string.len(this.text);
+    // Update text
+    this.panel->setLabel(this.text);
+  } else {
+    this.cursor_state = false;
+  }
+
+  this.active = active;
+  // Update button if necessary
+  if( this.button.toggled != active ) {
+    this.button->toggle();
+  }
+}
+
+function Textbox::clicked() {
+  var active = this.button.toggled;
+  if( active ) {
+    this->setActive(true);
+  } else {
+    if( this.text == "" ) {
+      this->abort();
+    } else {
+      this->confirm();
+    }
+  }
+}
+
+//! Handles special characters such as Enter. Normal text input is processed in the textInput function.
+//! Note though that this function still returns true if it appears to be a characters being entered.
+function Textbox::keyInput(char, rawchar) {
+  if( ! this.active ) {
+    return false;
+  }
+  var ui = this.panel.window.ui;
+  var line = type(this.text) == "table" && this.text[this.cursor_pos[1]] || this.text;
+  var pat = "%a%d_"; // which characters form "words" for ctrl+[left/right/backspace/delete]
+  var new_line;
+  var handled = false;
+  if( ! this.char_limit || string.len(line) < this.char_limit ) {
+    // Upper- and lowercase letters
+    if( this.allowed_input.alpha ) {
+      if( #char == 1 && string.match(char, '%a') ) {
+        handled = true;
+      }
+    }
+    // Numbers
+    if( ! handled && this.allowed_input.numbers ) {
+      if( #char == 1 && string.match(char, '%d') ) {
+        handled = true;
+      }
+    }
+    // Space, hyphen and plus sign
+    if( ! handled && this.allowed_input.misc ) {
+      if( char == "space" || char == "-" || char == "+" ) {
+        handled = true;
+      }
+    }
+  }
+  // Backspace (delete last char, or last word if ctrl is pressed)
+  if( ! handled && char == "backspace" ) {
+    if( this.cursor_pos[2] == 0 ) {
+      if( type(this.text) == "table" && this.cursor_pos[1] > 1 ) {
+        table.remove(this.text, this.cursor_pos[1]);
+        this.cursor_pos[1] = this.cursor_pos[1] - 1;
+        this.cursor_pos[2] = string.len(this.text[this.cursor_pos[1]]);
+        new_line = this.text[this.cursor_pos[1]] .. line;
+      }
+    } else {
+      var pos = this.cursor_pos[2] - 1;
+      if( ui.app.key_modifiers.ctrl ) {
+        pos = string.find(string.sub(line, 1, this.cursor_pos[2]),
+            "[^" .. pat .. "][" .. pat .. "]+[^" .. pat .. "]*$") || 0;
+      }
+      new_line = line->sub(1, pos) .. line->sub(this.cursor_pos[2] + 1, -1);
+      this.cursor_pos[2] = pos;
+    }
+    handled = true;
+  }
+  // Delete (delete next char, or next word if ctrl is pressed)
+  if( ! handled && char == "delete" ) {
+    if( this.cursor_pos[2] == string.len(line) ) {
+      if( type(this.text) == "table" && this.cursor_pos[1] < #this.text ) {
+        new_line = line .. this.text[this.cursor_pos[1] + 1];
+        table.remove(this.text, this.cursor_pos[1] + 1);
+      }
+    } else {
+      var pos = this.cursor_pos[2] + 2;
+      if( ui.app.key_modifiers.ctrl ) {
+        pos = (string.find(line, "[^" .. pat .. "][" .. pat .. "]",
+            this.cursor_pos[2] + 1) || string.len(line)) + 1;
+      }
+      new_line = line->sub(1, this.cursor_pos[2]) .. line->sub(pos, -1);
+    }
+    handled = true;
+  }
+  // Enter (newline or confirm)
+  if( ! handled && (char == "return" || char == "enter") ) {
+    if( type(this.text) == "table" ) {
+      var remainder = line->sub(this.cursor_pos[2] + 1, -1);
+      this.text[this.cursor_pos[1]] = line->sub(1, this.cursor_pos[2]);
+      table.insert(this.text, this.cursor_pos[1] + 1, remainder);
+      this.cursor_pos[1] = this.cursor_pos[1] + 1;
+      this.cursor_pos[2] = 0;
+      handled = true;
+    } else {
+      this->confirm();
+      return true;
+    }
+  }
+  // Escape (abort)
+  if( ! handled && char == "escape" ) {
+    this->abort();
+    return true;
+  }
+  // Arrow keys
+  if( ! handled ) {
+    if( char == "up" ) { // up
+      if( type(this.text) != "table" || this.cursor_pos[1] == 1 ) {
+        // to beginning of line
+        this.cursor_pos[2] = 0;
+      } else {
+        // one line up
+        this.cursor_pos[1] = this.cursor_pos[1] - 1;
+        this.cursor_pos[2] = math.min(this.cursor_pos[2], string.len(this.text[this.cursor_pos[1]]));
+      }
+      handled = true;
+    } else if( char == "down" ) { // down
+      if( type(this.text) != "table" || this.cursor_pos[1] == #this.text ) {
+        // to end of line
+        this.cursor_pos[2] = string.len(line);
+      } else {
+        // one line down
+        this.cursor_pos[1] = this.cursor_pos[1] + 1;
+        this.cursor_pos[2] = math.min(this.cursor_pos[2], string.len(this.text[this.cursor_pos[1]]));
+      }
+      handled = true;
+    } else if( char == "right" ) { // right
+      if( this.cursor_pos[2] == string.len(line) ) {
+        // next line
+        if( type(this.text) == "table" && this.cursor_pos[1] < #this.text ) {
+          this.cursor_pos[1] = this.cursor_pos[1] + 1;
+          this.cursor_pos[2] = 0;
+        }
+      } else {
+        if( ui.app.key_modifiers.ctrl ) {
+          // to the right until next word or end of line
+          this.cursor_pos[2] = string.find(line, "[^" .. pat .. "][" .. pat .. "]",
+              this.cursor_pos[2] + 1) || string.len(line);
+        } else {
+          // one to the right
+          this.cursor_pos[2] = this.cursor_pos[2] + 1;
+        }
+      }
+      handled = true;
+    } else if( char == "left" ) { // left
+      if( this.cursor_pos[2] == 0 ) {
+        // previous line
+        if( type(this.text) == "table" && this.cursor_pos[1] > 1 ) {
+          this.cursor_pos[1] = this.cursor_pos[1] - 1;
+          this.cursor_pos[2] = string.len(this.text[this.cursor_pos[1]]);
+        }
+      } else {
+        if( ui.app.key_modifiers.ctrl ) {
+          // to the left until beginning of word or beginning of line
+          this.cursor_pos[2] = string.find(string.sub(line, 1, this.cursor_pos[2]),
+              "[^" .. pat .. "][" .. pat .. "]+[^" .. pat .. "]*$") || 0;
+        } else {
+          // one to the left
+          this.cursor_pos[2] = this.cursor_pos[2] - 1;
+        }
+      }
+      handled = true;
+    }
+  }
+  // Tab (reserved)
+  if( ! handled && char == "tab" ) {
+    handled = true;
+  }
+  // Home (beginning of line)
+  if( ! handled && char == "home" ) {
+    this.cursor_pos[2] = 0;
+    handled = true;
+  }
+  // End (end of line)
+  if( ! handled && char == "end" ) {
+    this.cursor_pos[2] = string.len(line);
+    handled = true;
+  }
+  if( ! this.char_limit || string.len(this.text) < this.char_limit ) {
+    // Experimental "all" category
+    if( ! handled && this.allowed_input.all &&
+        ! (char == "shift" || char == "ctrl" || char == "alt") ) { // F-Keys
+      handled = true;
+    }
+  }
+  if( new_line ) {
+    if( type(this.text) == "table" ) {
+      this.text[this.cursor_pos[1]] = new_line;
+    } else {
+      this.text = new_line;
+    }
+    // update label
+    this.panel->setLabel(this.text);
+  }
+  // make cursor visible
+  this.cursor_counter = 0;
+  this.cursor_state = true;
+  return handled;
+}
+
+//! Handles actual text input.
+function Textbox::textInput(text) {
+  if( ! this.active ) {
+    return false;
+  }
+
+  var line = type(this.text) == "table" && this.text[this.cursor_pos[1]] || this.text;
+  var new_line = line->sub(1, this.cursor_pos[2]) .. text .. line->sub(this.cursor_pos[2] + 1, -1);
+  this.cursor_pos[2] = this.cursor_pos[2] + #text;
+
+  if( type(this.text) == "table" ) {
+    this.text[this.cursor_pos[1]] = new_line;
+  } else {
+    this.text = new_line;
+  }
+
+  // update label
+  this.panel->setLabel(this.text);
+}
+
+/* Limit input handled by textbox to specific classes of characters
+!param types (string or table) One of, or an table of any number of input types
+! valid input types are:
+!  "alpha": Letters (lower and uppercase)
+!  "numbers": 0-9
+!  "misc": other characters, currently space and hyphen
+!  "all": experimental category that allows, theoretically, all input
+*/
+function Textbox::allowedInput(types) {
+  if( type(types) != "table" ) { types = {types}; }
+  this.allowed_input = {};
+  for( _, t in ipairs(types) ) {
+    this.allowed_input[t] = true;
+  }
+  return this;
+}
+
+/* Limit input to a maximum of [limit] characters.
+!param limit (integer or nil) Number of characters until the textbox will stop accepting input, or nil to deactivate limit.
+*/
+function Textbox::characterLimit(limit) {
+  this.char_limit = limit;
+  return this;
+}
+
+/* Set the text of the textbox to a given string or list of strings.
+! Use empty string to make textbox a single line textbox (default).
+! Use table with empty string {""} to make it a multiline textbox.
+!param text (string or table) The string or list of strings the textbox should contain.
+*/
+function Textbox::setText(text) {
+  this.text = text;
+  this.panel->setLabel(this.text);
+  return this;
+}
+
+function Textbox::setPosition(x, y) {
+  this.button->setPosition(x, y);
+}
+
+function Textbox::setSize(width, height) {
+  this.button->setSize(width, height);
+}
+
+/* Convert a static panel into a textbox.
+! Textboxes consist of the panel given as a parameter, which is made into a
+ToggleButton automatically, and handle keyboard input while active.
+!param panel (panel) The panel that will serve as the textbox base.
+!param confirm_callback (function) The function to call when text is confirmed.
+!param abort_callback (function) The function to call when entering is aborted.
+*/
+function Window::makeTextboxOnPanel(panel, confirm_callback, abort_callback) {
+  var textbox = setmetatable({
+    panel = panel,
+    confirm_callback = confirm_callback,
+    abort_callback = abort_callback,
+    button = null, // placeholder
+    text = "",
+    allowed_input = {
+      alpha = true,
+      numbers = true,
+      misc = true,
+    },
+    char_limit = null,
+    visible = true,
+    enabled = true,
+    active = false,
+    cursor_counter = 0,
+    cursor_state = false,
+    cursor_pos = {1, 1},
+  }, textbox_mt);
+
+  var button = panel->makeToggleButton(0, 0, panel.w, panel.h, null, textbox.clicked, textbox);
+  textbox.button = button;
+
+  this.textboxes[#this.textboxes + 1] = textbox;
+  this.ui->registerTextBox(textbox);
+  return textbox;
+}
+
+
+function Window::draw(canvas, x, y) {
+  x, y = x + this.x, y + this.y;
+  if( this.panels[1] ) {
+    var panel_sprites = this.panel_sprites;
+    var panel_sprites_draw = panel_sprites && panel_sprites.draw;
+    for( _, panel in ipairs(this.panels) ) {
+      if( panel.visible ) {
+        if( panel.custom_draw ) {
+          panel->custom_draw(canvas, x, y);
+        } else {
+          panel_sprites_draw(panel_sprites, canvas, panel.sprite_index, x + panel.x, y + panel.y);
+        }
+      }
+    }
+  }
+  if( ! class.is(this, UI) ) { // prevent UI (sub)class from handling the textboxes too
+    for( _, box in ipairs(this.textboxes) ) {
+      box->drawCursor(canvas, x, y);
+    }
+  }
+  if( this.windows ) {
+    var windows = this.windows;
+    for( i = #windows, 1, -1 ) {
+      if( windows[i].visible ) {
+        windows[i]->draw(canvas, x, y);
+      }
+    }
+  }
+}
+
+function Window::onChangeLanguage() {
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      window->onChangeLanguage();
+    }
+  }
+}
+
+function Window::onCursorWorldPositionChange(x, y) {
+  var repaint = false;
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      if( window->onCursorWorldPositionChange(x - window.x, y - window.y) ) {
+        repaint = true;
+      }
+    }
+  }
+  return repaint;
+}
+
+function Window::hitTestPanel(x, y, panel) {
+  var xpos, ypos = x - panel.x, y - panel.y;
+  if( panel.visible && xpos >= 0 && ypos >= 0 ) {
+    if( panel.w && panel.h ) {
+      if( xpos <= panel.w && ypos <= panel.h ) {
+        return true;
+      }
+    } else {
+      if( this.panel_sprites->hitTest(panel.sprite_index, xpos, ypos) ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/* Used to test if the window has a (non-transparent) pixel at the given position.
+!param x (integer) The X co-ordinate of the pixel to test, relative to the
+top-left corner of the window.
+!param y (integer) The Y co-ordinate of the pixel to test, relative to the
+top-left corner of the window.
+*/
+function Window::hitTest(x, y) {
+  if( x < 0 || y < 0 || (this.width && x >= this.width) || (this.height && y >= this.height) ) {
+//    return false
+  }
+  if( this.panels[1] ) {
+    for( _, panel in ipairs(this.panels) ) {
+      if( this->hitTestPanel(x, y, panel) ) {
+        return true;
+      }
+    }
+  }
+  if( this.windows ) {
+    for( _, child in ipairs(this.windows) ) {
+      if( child->hitTest(x - child.x, y - child.y) ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function Window::onMouseDown(button, x, y) {
+  var repaint = false;
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      if( window->onMouseDown(button, x - window.x, y - window.y) ) {
+        repaint = true;
+        break;
+      }
+    }
+  }
+  if( ! repaint && (button == "left" || button == "right") ) {
+    for( _, btn in ipairs(this.buttons) ) {
+      if( btn.enabled && btn.x <= x && x < btn.r && btn.y <= y && y < btn.b && (button == "left" || btn.on_rightclick != null) ) {
+        btn.panel_for_sprite.sprite_index = btn.sprite_index_active;
+        this.active_button = btn;
+        btn.active = true;
+        btn.panel_for_sprite.lowered = btn.panel_lowered_active;
+        if( btn.is_repeat ) {
+          // execute callback once, then wait some ticks before repeatedly executing
+          btn->handleClick(button);
+        }
+        this.btn_repeat_delay = 10;
+        repaint = true;
+        break;
+      }
+    }
+    for( _, bar in ipairs(this.scrollbars) ) {
+      if( bar.enabled && this->hitTestPanel(x, y, bar.slider) ) {
+        this.active_scrollbar = bar;
+        bar.active = true;
+        bar.down_x = x - bar.slider.x;
+        bar.down_y = y - bar.slider.y;
+        repaint = true;
+        break;
+      }
+    }
+  }
+  if( this->hitTest(x, y) ) {
+    if( button == "left" && ! repaint ) {
+      this->beginDrag(x, y);
+    }
+    repaint = true;
+  }
+
+  if( repaint ) {
+    this->bringToTop();
+  }
+  return repaint;
+}
+
+/* Get the name of the saved window position group.
+! When the user drags a window, the new position of the window is saved, and
+then when any windows in the same group are opened in the future, the position
+of the new window is set to the saved position. By default, each window class
+is its own group, but by overriding this method, that can be changed.
+*/
+function Window::getSavedWindowPositionName() {
+  return class.type(this);
+}
+
+function Window::onMouseUp(button, x, y) {
+  var repaint = false;
+
+  if( this.dragging ) {
+    this.ui.drag_mouse_move = null;
+    this.dragging = false;
+    var config = this.ui.app.runtime_config;
+    if( ! config.window_position ) {
+      config.window_position = {};
+    }
+    config = config.window_position;
+    var name = this->getSavedWindowPositionName();
+    if( ! config[name] ) {
+      config[name] = {};
+    }
+    config = config[name];
+    config.x = this.x_original;
+    config.y = this.y_original;
+    return false;
+  }
+
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      if( window->onMouseUp(button, x - window.x, y - window.y) ) {
+        repaint = true;
+        break; // Click has been handled. No need to look any further.
+      }
+    }
+  }
+
+  if( button == "left" || button == "right" ) {
+    var btn = this.active_button;
+    if( btn ) {
+      btn.panel_for_sprite.sprite_index = btn.sprite_index_normal;
+      btn.active = false;
+      btn.panel_for_sprite.lowered = btn.panel_lowered_normal;
+      this.active_button = false;
+      this.btn_repeat_delay = null;
+      if( btn.enabled && ! btn.is_repeat && btn.x <= x && x < btn.r && btn.y <= y && y < btn.b ) {
+        btn->handleClick(button);
+      }
+      repaint = true;
+    }
+    var bar = this.active_scrollbar;
+    if( bar ) {
+      this.active_scrollbar = null;
+      bar.active = false;
+      bar.down_x = null;
+      bar.down_y = null;
+    }
+  }
+
+  return repaint;
+}
+
+function Window::onMouseWheel(x, y) {
+  var repaint = false;
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      if( window->onMouseWheel(x, y) ) {
+        repaint = true;
+        break; // Scroll has been handled. No need to look any further.
+      }
+    }
+  }
+  return repaint;
+}
+
+var /*persistable:window_drag_position_representation*/ function getNicestPositionRepresentation(pos, size, dim_size) {
+  if( size == dim_size ) {
+    return 0.5;
+  }
+
+  var left_rel = pos;
+  var right_rel = pos + size - dim_size;
+  var rel = pos / (dim_size - size);
+  if( 0.15 < rel && rel < 0.85 ) {
+    return rel;
+  }
+  if( left_rel <= 0 ) {
+    return 0;
+  }
+  if( right_rel >= 0 ) {
+    return -0.1;
+  }
+  if( left_rel <= -right_rel ) {
+    return left_rel;
+  } else {
+    return right_rel;
+  }
+}
+
+/* Initiate dragging of the window.
+!param x The X position of the cursor in window co-ordinatees.
+!param y The Y position of the cursor in window co-ordinatees.
+*/
+function Window::beginDrag(x, y) {
+  if( ! this.width || ! this.height || ! this.ui ||
+      this.ui.app.runtime_config.lock_windows || ! this.draggable ) {
+    // Need width, height and UI to do a drag
+    return false;
+  }
+
+  this.dragging = true;
+  this.ui.drag_mouse_move = /*persistable:window_drag_mouse_move*/ function (sx, sy) {
+    // sx and sy are cursor screen co-ords. Convert to window's new abs co-ords
+    sx -=   x;
+    sy = sy - y;
+    // Calculate best positioning
+    var w, h = TheApp.config.width, TheApp.config.height;
+    if( TheApp.key_modifiers.ctrl ) {
+      var px = round(sx / (w - this.width), 0.1);
+      var py = round(sy / (h - this.height), 0.1);
+      if( px >= 1 ) {
+        px = -0.1;
+      } else if( px < 0 ) {
+        px = 0;
+      }
+      if( py >= 1 ) {
+        py = -0.1;
+      } else if( py < 0 ) {
+        py = 0;
+      }
+      this->setPosition(px, py);
+    } else {
+      var px = getNicestPositionRepresentation(sx, this.width , w);
+      var py = getNicestPositionRepresentation(sy, this.height, h);
+      this->setPosition(px, py);
+    }
+  };
+  return true;
+}
+
+/* Called when the user moves the mouse.
+!param x (integer) The new X co-ordinate of the cursor, relative to the top-left
+corner of the window.
+!param y (integer) The new Y co-ordinate of the cursor, relative to the top-left
+corner of the window.
+!param dx (integer) The number of pixels which the cursor moved horizontally.
+!param dy (integer) The number of pixels which the cursor moved vertically.
+*/
+function Window::onMouseMove(x, y, dx, dy) {
+  var repaint = false;
+
+  this.cursor_x = x;
+  this.cursor_y = y;
+
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      if( window->onMouseMove(x - window.x, y - window.y, dx, dy) ) {
+        repaint = true;
+      }
+    }
+  }
+
+  if( this.active_button ) {
+    var btn = this.active_button;
+    var index = btn.sprite_index_blink || btn.sprite_index_normal;
+    if( btn.x <= x && x < btn.r && btn.y <= y && y < btn.b ) {
+      index = btn.sprite_index_active;
+      this.active_button.active = true;
+      btn.panel_for_sprite.lowered = btn.panel_lowered_active;
+    } else {
+      this.active_button.active = false;
+      btn.panel_for_sprite.lowered = btn.panel_lowered_normal;
+      for( _, button in ipairs(this.buttons) ) {
+        if( button.enabled && button.x <= x && x < button.r && button.y <= y && y < button.b ) {
+          button.panel_for_sprite.sprite_index = button.sprite_index_active;
+          button.active = true;
+          button.panel_for_sprite.lowered = button.panel_lowered_active;
+          this.active_button = button;
+          repaint = true;
+          break;
+        }
+      }
+    }
+    if( btn.panel_for_sprite.sprite_index != index ) {
+      btn.panel_for_sprite.sprite_index = index;
+      repaint = true;
+    }
+  }
+
+  if( this.active_scrollbar ) {
+    var bar = this.active_scrollbar;
+    if( bar.direction == "x" ) {
+      bar->setXorY(x - bar.down_x);
+    } else if( bar.direction == "y" ) {
+      bar->setXorY(y - bar.down_y);
+    }
+  }
+
+  return repaint;
+}
+
+// Called regularly at a rate independent of the game speed.
+function Window::onTick() {
+  if( this.active_button ) {
+    var btn = this.active_button;
+    var mouse_btn = this.buttons_down.mouse_left && "left" || this.buttons_down.mouse_right && "right" || null;
+    if( mouse_btn ) {
+      if( this.btn_repeat_delay > 0 ) {
+        this.btn_repeat_delay = this.btn_repeat_delay - 1;
+      } else {
+        if( btn.active && btn.is_repeat ) {
+          this.btn_repeat_delay = 2;
+          btn->handleClick(mouse_btn);
+        }
+      }
+    }
+  }
+  if( this.blinking_button ) {
+    this.blink_counter = this.blink_counter + 1;
+    if( this.blink_counter == 20 ) {
+      this.blink_counter = 0;
+      var btn = this.buttons[this.blinking_button];
+      btn.sprite_index_blink = btn.sprite_index_blink == btn.sprite_index_active && btn.sprite_index_normal || btn.sprite_index_active;
+      if( btn.enabled && ! btn.active ) {
+        btn.panel_for_sprite.sprite_index = btn.sprite_index_blink;
+      }
+    }
+  }
+  if( ! class.is(this, UI) ) { // prevent UI (sub)class from handling the textboxes too
+    for( _, box in ipairs(this.textboxes) ) {
+      box->onTick();
+    }
+  }
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      window->onTick();
+    }
+  }
+}
+
+// Called regularly at the same rate that entities are ticked.
+function Window::onWorldTick() {
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      window->onWorldTick();
+    }
+  }
+}
+
+// Bring the window to the top of its parent
+function Window::bringToTop() {
+  if( this.parent ) {
+    this.parent->sendToTop(this);
+  }
+}
+
+// Tell the window to bring the specified sub-window to its top
+function Window::sendToTop(window) {
+  var window_index;
+  if( this.windows ) {
+    for( i = 1, #this.windows ) { // Search specified window in windows list
+      if( this.windows[i] == window ) {
+        window_index = i; // Keep window index
+        break;
+      }
+    }
+  }
+
+  if( window_index != null ) {
+    var insert_pos;
+    if( window.on_top ) {
+      insert_pos = 1;
+    } else {
+      // First position after any on_top windows
+      for( i = 1, #this.windows ) {
+        if( ! this.windows[i].on_top ) {
+          insert_pos = i;
+          break;
+        }
+      }
+      insert_pos = insert_pos || #this.windows + 1;
+    }
+    table.remove(this.windows, window_index);       // Remove the window from the list
+    table.insert(this.windows, insert_pos, window); // And reinsert it at the before computed position
+  }
+}
+
+// Tell the window to bring the specified sub-window to its bottom
+function Window::sendToBottom(window) {
+  if( this.windows ) {
+    for( i = 1, #this.windows ) { // Search specified window in windows list
+      if( this.windows[i] == window ) {
+        table.remove(this.windows, i);       // Remove the window from the list
+        table.insert(this.windows, #this.windows + 1, window); // And reinsert it at the end
+        break;
+      }
+    }
+  }
+}
+
+function Window::startButtonBlinking(button_index) {
+
+  this.blinking_button = button_index;
+  this.blink_counter = 0;
+  var btn = this.buttons[button_index];
+  btn.sprite_index_blink = btn.sprite_index_normal;
+}
+
+function Window::stopButtonBlinking() {
+  // Does any button actually blink?
+  if( this.blinking_button ) {
+    var btn = this.buttons[this.blinking_button];
+    btn.panel_for_sprite.sprite_index = btn.sprite_index_normal;
+    btn.sprite_index_blink = null;
+    this.blinking_button = false;
+    this.blink_counter = 0;
+  }
+}
+
+//! Create a static (non-changeable) tooltip to be displayed in a certain region.
+//! tooltip_x and tooltip_y are optional; if not specified, it will default to top center of region.
+//!param text (string) The string to display.
+//!param x (integer) The X co-ordinate relative to the top-left corner.
+//!param y (integer) The Y co-ordinate relative to the top-left corner.
+//!param r (integer) The right (X + width) co-ordinate relative to the top-left corner.
+//!param b (integer) The bottom (Y + height) co-ordinate relative to the top-left corner.
+//!param tooltip_x (integer) [optional] The X co-ordinate to display the tooltip at.
+//!param tooltip_y (integer) [optional] The Y co-ordinate to display the tooltip at.
+function Window::makeTooltip(text, x, y, r, b, tooltip_x, tooltip_y) {
+  var region = {
+    text = text, x = x, y = y, r = r, b = b,
+    tooltip_x = tooltip_x || round((x + r) / 2, 1), // optional
+    tooltip_y = tooltip_y || y,                     // optional
+  };
+  this.tooltip_regions[#this.tooltip_regions + 1] = region;
+  return region;
+}
+
+//! Create a dynamic tooltip to be displayed in a certain region.
+//! tooltip_x and tooltip_y are optional; if not specified, it will default to top center of region.
+//!param callback (function) A function that returns the string to display or nil for no tooltip.
+//!param x (integer) The X co-ordinate relative to the top-left corner.
+//!param y (integer) The Y co-ordinate relative to the top-left corner.
+//!param r (integer) The right (X + width) co-ordinate relative to the top-left corner.
+//!param b (integer) The bottom (Y + height) co-ordinate relative to the top-left corner.
+//!param tooltip_x (integer) [optional] The X co-ordinate to display the tooltip at.
+//!param tooltip_y (integer) [optional] The Y co-ordinate to display the tooltip at.
+function Window::makeDynamicTooltip(callback, x, y, r, b, tooltip_x, tooltip_y) {
+  var region = {
+    callback = callback, x = x, y = y, r = r, b = b,
+    tooltip_x = tooltip_x || round((x + r) / 2, 1), // optional
+    tooltip_y = tooltip_y || y,                     // optional
+  };
+  this.tooltip_regions[#this.tooltip_regions + 1] = region;
+  return region;
+}
+
+// An 'element' can either be a panel, a button, or a tooltip region.
+function Window::getTooltipForElement(elem, x, y) {
+  var text;
+  if( elem.callback ) {
+    text = elem.callback(x, y);
+  } else {
+    text = elem.text;
+  }
+  var xpos, ypos = elem.tooltip_x, elem.tooltip_y;
+  if( xpos ) { xpos = xpos + this.x; } // NB: can be nil, then it means position at mouse cursor
+  if( ypos ) { ypos = ypos + this.y; }
+  if( text ) {
+    return { text = text, x = xpos, y = ypos };
+  }
+}
+
+//! Query the window for tooltip text to display for a particular position.
+//! Tooltips are either associated with buttons, panels, or a region.
+// (see Button:setTooltip, Panel:setTooltip, Window:make[Dynamic]Tooltip)
+//! Button tooltips take precedence over region tooltips, which again take precedence over panels.
+// Returns tooltip in form of { text = .. , x = .. , y = .. } or nil for no tooltip.
+//!param x (integer) The X co-ordinate relative to the top-left corner.
+//!param y (integer) The Y co-ordinate relative to the top-left corner.
+function Window::getTooltipAt(x, y) {
+  if( x < 0 || y < 0 || (this.width && x >= this.width) || (this.height && y >= this.height) ) {
+    return;
+  }
+  if( this.windows ) {
+    for( _, window in ipairs(this.windows) ) {
+      if( window->hitTest(x - window.x, y - window.y) ) {
+        return window->getTooltipAt(x - window.x, y - window.y);
+      }
+    }
+  }
+  for( _, btn in ipairs(this.buttons) ) {
+    if( btn.visible != false && btn.tooltip && btn.x <= x && x < btn.r && btn.y <= y && y < btn.b ) {
+      return this->getTooltipForElement(btn.tooltip, x, y);
+    }
+  }
+  if( ! this.tooltip_regions ) { this.tooltip_regions = {}; } // TEMPORARY for compatibility of pre-r649 savegames. Remove when compatibility is broken anyway.
+  for( _, region in ipairs(this.tooltip_regions) ) {
+    if( region.enabled != false && region.x <= x && x < region.r && region.y <= y && y < region.b ) {
+      return this->getTooltipForElement(region, x, y);
+    }
+  }
+  for( _, pnl in ipairs(this.panels) ) {
+    if( pnl.tooltip && this->hitTestPanel(x, y, pnl) ) {
+      return this->getTooltipForElement(pnl.tooltip, x, y);
+    }
+  }
+}
+
+//! Stub to be extended in subclasses, if needed.
+function Window::afterLoad(old, new) {
+  if( old < 2 ) {
+    // Scrollbars were added
+    this.scrollbars = {};
+  }
+  if( old < 3 ) {
+    // Textboxes were added
+    this.textboxes = {};
+  }
+  if( old < 22 ) {
+    this.draggable = true;
+  }
+  if( old < 32 ) {
+    // ui added to buttons
+    for( _, btn in ipairs(this.buttons) ) {
+      btn.ui = this.ui;
+    }
+  }
+
+  if( this.windows ) {
+    for( _, w in pairs(this.windows) ) {
+      w->afterLoad(old, new);
+    }
+  }
+}

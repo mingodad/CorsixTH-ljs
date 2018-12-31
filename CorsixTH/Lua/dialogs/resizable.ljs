@@ -1,0 +1,208 @@
+/* Copyright (c) 2010 Manuel "Roujin" Wolf
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Class for resizable windows.
+//! If resizable is set to true, the user can resize by clicking and dragging
+//any of the corners.
+class ("UIResizable") (Window);
+
+//-@type UIResizable
+var UIResizable = _G["UIResizable"];
+
+var border_offset_x = 9;
+var border_offset_y = 9;
+var border_size_x = 40;
+var border_size_y = 40;
+
+function UIResizable::UIResizable(ui, width, height, colour, no_borders, background_bevel) {
+  this->Window();
+
+  var app = ui.app;
+  this.ui = ui;
+  this.resizable = false; // by default, not user-resizable
+  if( ! no_borders ) {
+    this.border_sprites = app.gfx->loadSpriteTable("Bitmap", "aux_ui", true);
+  }
+
+  if( background_bevel ) {
+    this.background_panel = this->addBevelPanel(0, 0, 0, 0, colour);
+    this.background_panel.lowered = true;
+  } else {
+    this.background_panel = this->addColourPanel(0, 0, 0, 0, 0, 0, 0);
+  }
+
+  // Minimum size. Can be changed per window, but should never be smaller than this
+  // because it would result in visual glitches
+  this.min_width = 50;
+  this.min_height = 50;
+
+  this.border_pos = {};
+  this.border_pos.left = -border_offset_x;
+  this.border_pos.upper = -border_offset_y;
+
+  // NB: intentionally calling like this to allow subclasses to extend setSize without being called from here
+  UIResizable.setSize(this, width, height);
+  this->setColour(colour);
+}
+
+function UIResizable::setSize(width, height) {
+  width = math.max(this.min_width, width);
+  height = math.max(this.min_height, height);
+
+  this.width = width;
+  this.height = height;
+  this.background_panel.w = width;
+  this.background_panel.h = height;
+
+  this.border_pos.right = this.width;
+  this.border_pos.corner_right = this.width - border_size_x;
+
+  this.border_pos.lower = this.height;
+  this.border_pos.corner_lower = this.height - border_size_y;
+}
+
+function UIResizable::setColour(colour) {
+  this.colour = colour;
+  this.background_panel->setColour(colour);
+}
+
+function UIResizable::draw(canvas, x, y) {
+  var sprites = this.border_sprites;
+  if( sprites ) {
+    var draw = sprites.draw;
+    var xabs = this.x + x;
+    var yabs = this.y + y;
+
+    canvas->nonOverlapping(true);
+    draw(sprites, canvas, 10, xabs + this.border_pos.left        , yabs + this.border_pos.upper); // upper left corner
+    draw(sprites, canvas, 12, xabs + this.border_pos.corner_right, yabs + this.border_pos.upper); // upper right corner
+    draw(sprites, canvas, 15, xabs + this.border_pos.left        , yabs + this.border_pos.corner_lower); // lower left corner
+    draw(sprites, canvas, 17, xabs + this.border_pos.corner_right, yabs + this.border_pos.corner_lower); // lower right corner
+
+    for( xpos = xabs + border_size_x, xabs + this.border_pos.corner_right - 1, border_size_x ) {
+      draw(sprites, canvas, 11, xpos, yabs + this.border_pos.upper); // upper edge
+      draw(sprites, canvas, 16, xpos, yabs + this.border_pos.lower); // lower edge
+    }
+    for( ypos = yabs + border_size_y, yabs + this.border_pos.corner_lower - 1, border_size_y ) {
+      draw(sprites, canvas, 13, xabs + this.border_pos.left, ypos);  // left edge
+      draw(sprites, canvas, 14, xabs + this.border_pos.right, ypos); // right edge
+    }
+
+    canvas->nonOverlapping(false);
+  }
+  // Draw window components
+  Window.draw(this, canvas, x, y);
+}
+
+function UIResizable::onMouseDown(button, x, y) {
+  var res = this.resizable && this->hitTestCorners(x, y);
+  if( res ) {
+    this->beginResize(x, y, res);
+    return true;
+  }
+  return Window.onMouseDown(this, button, x, y);
+}
+
+function UIResizable::hitTest(x, y) {
+  if( x >= 0 && y >= 0 && x < this.width && y < this.height ) { // inside window
+    return Window.hitTest(this, x, y);
+  }
+  var sprites = this.border_sprites;
+  if( ! sprites ) {
+    return false;
+  }
+  if( x < -9 || y < -9 || x >= this.width + 9 || y >= this.height + 9 ) { // outside border bounds
+    return false;
+  }
+  if( (0 <= x && x < this.width) || (0 <= y && y < this.height) ) { // edges (upper/lower/left/right)
+    return true;
+  }
+  return this->hitTestCorners(x, y) && true;
+}
+
+//! Tests if any of the four corners of the window border is hit
+//!param x the x coordinate to test
+//!param y the y coordinate to test
+//!return (boolean or string) false if not hit, else a string to denote which corner was hit (can be "ul", "ur", "ll" or "lr")
+function UIResizable::hitTestCorners(x, y) {
+  if( this.border_sprites ) {
+    var yzone = (-9 <= y && y < 0) && "u" || (this.height <= y && y < this.height + 9) && "l";
+    var xzone = (-9 <= x && x < 0) && "l" || (this.width  <= x && x < this.width  + 9) && "r";
+
+    var sprite_ids = {ul = 10, ur = 12, ll = 15, lr = 17};
+    if( yzone && xzone ) {
+      var zone = yzone .. xzone;
+      var dy = (yzone == "u" && this.border_pos.upper || this.border_pos.corner_lower);
+      var dx = (xzone == "l" && this.border_pos.left  || this.border_pos.corner_right);
+      return this.border_sprites->hitTest(sprite_ids[zone], x - dx, y - dy) && zone;
+    }
+  }
+  return false;
+}
+
+/* Initiate resizing of the resizable window.
+!param x The X position of the cursor in window co-ordinatees.
+!param y The Y position of the cursor in window co-ordinatees.
+!param mode Either one of "ul", "ur", "ll" or "lr" to denote in which direction to resize. (upper/lower + left/right)
+*/
+function UIResizable::beginResize(x, y, mode) {
+  var orig_x = this.x;
+  var orig_y = this.y;
+  var ref_x = this.x + x;
+  var ref_y = this.y + y;
+  var orig_width = this.width;
+  var orig_height = this.height;
+
+  this.dragging = true;
+  this.ui.drag_mouse_move = /*persistable:window_resize_mouse_move*/ function (sx, sy) {
+    // sx and sy are cursor screen co-ords. Convert to relative change.
+    sx -=   ref_x;
+    sy -=   ref_y;
+
+    var invert_x = mode == "ul" || mode == "ll";
+    var invert_y = mode == "ul" || mode == "ur";
+
+    sx = invert_x && -sx || sx;
+    sy = invert_y && -sy || sy;
+
+    this->setSize(orig_width + sx, orig_height + sy);
+    var new_x, new_y;
+
+    if( invert_x ) {
+      new_x = orig_x + orig_width - this.width;
+    }
+    if( invert_y ) {
+      new_y = orig_y + orig_height - this.height;
+    }
+
+    if( new_x || new_y ) {
+      this->setPosition(new_x || orig_x, new_y || orig_y);
+    }
+  };
+}
+
+function UIResizable::afterLoad(old, new) {
+  Window.afterLoad(this, old, new);
+  if( old < 65 ) {
+    // added min_width and min_height
+    this.min_width = 50;
+    this.min_height = 50;
+  }
+}

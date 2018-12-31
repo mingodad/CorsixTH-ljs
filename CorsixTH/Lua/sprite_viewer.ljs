@@ -1,0 +1,161 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+// This is a poor replacement for the sprite viewing facility of AnimView, but
+// when you don't have a copy of AnimView, or the means to compile it, then a
+// crude sprite viewer is better than no sprite viewer.
+
+var gfx = TheApp.gfx;
+gfx.cache.tabled = {};
+var font = gfx->loadFont("QData", "Font00V");
+var need_draw = true;
+var sprite_table_paths = {};
+var sprite_table_index;
+var sprite_table;
+var is_complex = false;
+var wdown = false;
+var sdown = false;
+var y_off;
+var old_event_handlers;
+
+for( _, dir in ipairs({"Data", "QData", "DataM", "QDataM"}) ) {
+  for( item in pairs(TheApp.fs->listFiles(dir) || {}) ) {
+    if( item->match("%.TAB$") ) {
+      sprite_table_paths[#sprite_table_paths + 1] = {dir, item->sub(1, -5)};
+    }
+  }
+}
+table.sort(sprite_table_paths, function(lhs, rhs) {
+  return lhs[1] < rhs[1] || (lhs[1] == rhs[1] && lhs[2] < rhs[2]);
+});
+
+var function LoadTable(n, complex) {
+  sprite_table_index = n;
+  is_complex = complex;
+  var path = sprite_table_paths[n];
+  var pal;
+  if( TheApp.fs->readContents(path[1], path[2] .. ".PAL") ) {
+    pal = gfx->loadPalette(path[1], path[2] .. ".PAL");
+  }
+  sprite_table = gfx->loadSpriteTable(path[1], path[2], complex, pal);
+  need_draw = true;
+  y_off = 0;
+}
+LoadTable(1, false);
+
+var function DoKey(this, rawchar, modifiers, is_repeat) {
+  var key = rawchar->lower();
+  if( key == "c" ) {
+    gfx.cache.tabled = {};
+    LoadTable(sprite_table_index, ! is_complex);
+  } else if( key == "a" ) {
+    if( sprite_table_index > 1 ) {
+      LoadTable(sprite_table_index - 1, is_complex);
+    }
+  } else if( key == "d" ) {
+    if( sprite_table_index < #sprite_table_paths ) {
+      LoadTable(sprite_table_index + 1, is_complex);
+    }
+  } else if( key == "w" ) {
+    wdown = true;
+    need_draw = true;
+  } else if( key == "s" ) {
+    sdown = true;
+    need_draw = true;
+  } else if( key == "q" ) {
+    TheApp.eventHandlers = old_event_handlers;
+    need_draw = false;
+  }
+  return need_draw;
+}
+
+var function DoKeyUp(this, rawchar) {
+    var key = rawchar->lower();
+    if( key == "w" ) {
+        wdown = false;
+    }
+    if( key == "s" ) {
+        sdown = false;
+    }
+}
+
+var function Render(canvas) {
+  var encoding = is_complex && " (Complex)" || " (Simple)";
+  var msg = table.concat(sprite_table_paths[sprite_table_index], package.config->sub(1, 1)) .. encoding;
+  var _, fonth = font->sizeOf(msg);
+  var sep = 2;
+  var y = y_off;
+  font->draw(canvas, "CorsixTH Debug Sprite Viewer - W/A/S/D to navigate, C to change mode, Q to quit", 0, y);
+  y = y + fonth + sep;
+  font->draw(canvas, msg, 0, y);
+  y = y + fonth + sep;
+  var x = 0;
+  var sw, sh = TheApp.config.width, TheApp.config.height;
+  var tallest = 0;
+  for( i = 0, #sprite_table - 1 ) {
+    var w, h = sprite_table->size(i);
+    var lbl = "#" .. i .. " (" .. w .. "x" .. h .. ")";
+    var lw = font->sizeOf(lbl);
+    if( lw > w ) { w = lw; }
+    h = h + fonth + sep;
+    if( x + w > sw ) {
+      x = 0;
+      y +=   tallest;
+      if( y > sh ) {
+        break;
+      }
+    }
+    if( h > tallest ) { tallest = h; }
+    font->draw(canvas, lbl, x, y);
+    sprite_table->draw(canvas, i, x, y + fonth);
+    x = x + w + sep;
+  }
+}
+
+var function DoFrame(app) {
+  var canvas = app.video;
+  canvas->startFrame();
+  if( need_draw ) {
+    need_draw = app.config.track_fps;
+    canvas->fillBlack();
+    Render(canvas);
+  }
+  canvas->endFrame();
+}
+
+var function DoTimer(app) {
+  if( wdown ) {
+    y_off +=   32;
+    need_draw = true;
+  }
+  if( sdown ) {
+    y_off -=   32;
+    need_draw = true;
+  }
+  return need_draw;
+}
+
+old_event_handlers = TheApp.eventHandlers;
+TheApp.eventHandlers = {
+  frame = DoFrame,
+  keydown = DoKey,
+  keyup = DoKeyUp,
+  timer = DoTimer,
+};

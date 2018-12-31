@@ -1,0 +1,386 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("QueueAction") (HumanoidAction);
+
+//-@type QueueAction
+var QueueAction = _G["QueueAction"];
+
+//! Queue for something (door or reception desk).
+//!param x X position of the queue.
+//!param y Y position of the queue.
+//!param queue (Queue) Queue to join
+function QueueAction::QueueAction(x, y, queue) {
+  assert(type(x) == "number", "Invalid value for parameter 'x'");
+  assert(type(y) == "number", "Invalid value for parameter 'y'");
+  assert(class.is(queue, Queue), "Invalid value for parameter 'queue'");
+
+  this->HumanoidAction("queue");
+  this.x = x; // Position of the queue(?)
+  this.y = y;
+  this.face_x = null; // Tile to turn the face to.
+  this.face_y = null;
+  this.queue = queue;
+  this.reserve_when_done = null; // Object to reserve when leaving the queue.
+}
+
+//! Set the object to reserve when queueing is done.
+//!param door (object) Object to reserve when leaving the queue.
+//!return (action) self, for daisy-chaining.
+function QueueAction::setReserveWhenDone(door) {
+  assert(class.is(door, Door), "Invalid value for parameter 'door'");
+
+  this.reserve_when_done = door;
+  return this;
+}
+
+//! Set the tile to face.
+//!param face_x (int) X coordinate of the tile to face.
+//!param face_y (int) Y coordinate of the tile to face.
+//!return (action) self, for daisy-chaining.
+function QueueAction::setFaceDirection(face_x, face_y) {
+  assert(type(face_x) == "number", "Invalid value for parameter 'face_x'");
+  assert(type(face_y) == "number", "Invalid value for parameter 'face_y'");
+
+  this.face_x = face_x;
+  this.face_y = face_y;
+  return this;
+}
+
+var function get_direction(x, y, facing_x, facing_y) {
+  if( facing_y < y ) {
+    return "north";
+  } else if( facing_y > y ) {
+    return "south";
+  }
+  if( facing_x > x ) {
+    return "east";
+  } else if( facing_x < x ) {
+    return "west";
+  }
+}
+
+var function interrupt_head(humanoid, n) {
+  while( n > 1 ) {
+    var action = humanoid.action_queue[n];
+    if( action.name == "use_object" ) {
+      // Pull object usages out of the queue
+      if( action.object && action.object->isReservedFor(humanoid) ) {
+        action.object->removeReservedUser(humanoid);
+      }
+      table.remove(humanoid.action_queue, n);
+    } else {
+      // Mark other actions as needing interruption
+      assert(action.must_happen);
+      action.todo_interrupt = true;
+    }
+    --n    ;
+  }
+
+  var action = humanoid.action_queue[n];
+  assert(action.must_happen);
+  var on_interrupt = action.on_interrupt;
+  if( on_interrupt ) {
+    action.on_interrupt = null;
+    on_interrupt(action, humanoid);
+  }
+}
+
+var function action_queue_find_idle(action, humanoid) {
+  var found_any = false;
+  for( i, current_action in ipairs(humanoid.action_queue) ) {
+    if( current_action.name == "idle" ) {
+      found_any = true;
+      if( humanoid.action_queue[i + 1] == action ) {
+        return i;
+      }
+    }
+  }
+  if( found_any ) {
+    print("Warning: Proper idle not in action_queue");
+  }
+  return -1;
+}
+
+var function action_queue_find_drink_action(action, humanoid) {
+  var found_any = false;
+  for( i, current_action in ipairs(humanoid.action_queue) ) {
+    if( current_action.name == "use_object" && current_action.object.object_type.id == "drinks_machine" ) {
+      found_any = true;
+      if( humanoid.action_queue[i + 1] == action ) {
+        return i;
+      }
+    }
+  }
+  if( found_any ) {
+    error("Proper drink action not in action_queue");
+  } else {
+    return -1;
+  }
+}
+
+// Finish standing includes currently going to the drinks machine.
+var function action_queue_finish_standing(action, humanoid) {
+  var index = action_queue_find_idle(action, humanoid);
+  if( index == -1 ) {
+    // Maybe going to the drinks machine?
+    index = action_queue_find_drink_action(action, humanoid);
+    if( index == -1 ) {
+      // Attempt to recover by assuming the person is sitting down.
+      print("Warning: Idle not in action_queue");
+      if( humanoid->getCurrentAction().name == "use_object" ) {
+        // It is likely that the person is sitting down.
+        return action_queue_leave_bench(action, humanoid);
+      } else {
+        error("This person seems to neither be standing nor sitting?!");
+      }
+    }
+  }
+  interrupt_head(humanoid, index);
+  ++index    ;
+  while( index >= 1 ) {
+    var current_action = humanoid.action_queue[index];
+    if( current_action == action ) {
+      return index - 1;
+    }
+    --index    ;
+  }
+  error("Queue action not in action_queue");
+}
+
+var function action_queue_leave_bench(action, humanoid) {
+  var index;
+  for( i, current_action in ipairs(humanoid.action_queue) ) {
+    // Check to see that we haven't
+    // gotten to the actual queue action yet.
+    // Instead of crashing if we have, try with the assumption
+    // that we're actually standing.
+    if( current_action == action ) {
+      print("Warning: A patient supposedly sitting down was not," ..
+        " trying to recover assuming he/she is standing.");
+      return action_queue_finish_standing(action, humanoid);
+    }
+    if( current_action.name == "use_object" ) {
+      if( humanoid.action_queue[i + 1] == action ) {
+        interrupt_head(humanoid, i);
+        index = i;
+        break;
+      }
+    }
+  }
+  ++index    ;
+  while( index >= 1 ) {
+    var current_action = humanoid.action_queue[index];
+    if( current_action == action ) {
+      return index - 1;
+    }
+    --index    ;
+  }
+  error("Queue action not in action_queue");
+}
+
+var action_queue_on_change_position = permanent("action_queue_on_change_position")( function(action, humanoid) {
+  // Only proceed with this handler if the patient is still in the queue
+  if( ! action.is_in_queue ) {
+    return;
+  }
+
+  // Find out if we have to be standing up - considering humanoid_class covers both health inspector and VIP
+  var must_stand = class.is(humanoid, Staff) || humanoid.humanoid_class == "Inspector" ||
+    humanoid.humanoid_class == "VIP" || (humanoid.disease && humanoid.disease.must_stand);
+  var queue = action.queue;
+  if( ! must_stand ) {
+    for( i = 1, queue.bench_threshold ) {
+      if( queue[i] == humanoid ) {
+        must_stand = true;
+        break;
+      }
+    }
+  }
+
+  if( ! must_stand ) {
+    // Try to find a bench
+    var bench_max_distance;
+    if( action->isStanding() ) {
+      bench_max_distance = 10;
+    } else {
+      bench_max_distance = action.current_bench_distance / 2;
+    }
+    var bench, bx, by, dist = humanoid.world->getFreeBench(action.x, action.y, bench_max_distance);
+    if( bench ) {
+      var num_actions_prior;
+      if( action->isStanding() ) {
+        num_actions_prior = action_queue_finish_standing(action, humanoid);
+      } else {
+        num_actions_prior = action_queue_leave_bench(action, humanoid);
+      }
+      action.current_bench_distance = dist;
+      humanoid->queueAction(WalkAction(bx, by)->setMustHappen(true), num_actions_prior);
+      humanoid->queueAction(UseObjectAction(bench)->setMustHappen(true), num_actions_prior + 1);
+      bench.reserved_for = humanoid;
+      return;
+    } else if( ! action->isStanding() ) {
+      // Already sitting down, so nothing to do.
+      return;
+    }
+  }
+
+  // Stand up in the correct position in the queue
+  var standing_index = 0;
+  var our_room = humanoid->getRoom();
+  for( _, person in ipairs(queue) ) {
+    if( person == humanoid ) {
+      break;
+    }
+    if( queue.callbacks[person]->isStanding() && person->getRoom() == our_room ) {
+      ++standing_index    ;
+    }
+  }
+  var ix, iy = humanoid.world->getIdleTile(action.x, action.y, standing_index);
+  assert(ix && iy);
+  var facing_x, facing_y;
+  if( standing_index == 0 ) {
+    facing_x, facing_y = action.face_x || action.x, action.face_y || action.y;
+  } else {
+    facing_x, facing_y = humanoid.world->getIdleTile(action.x, action.y, standing_index - 1);
+  }
+  assert(facing_x && facing_y);
+  var idle_direction = get_direction(ix, iy, facing_x, facing_y);
+  if( action->isStanding() ) {
+    var idle_index = action_queue_find_idle(action, humanoid);
+    if( idle_index == -1 ) {
+      idle_index = action_queue_find_drink_action(action, humanoid);
+      if( idle_index != -1 ) {
+        // Going to get a drink. Do nothing since it will be fixed after getting the drink.
+        return;
+      } else {
+        error("Could not find an idle or drink action when trying to stand in line.");
+      }
+    }
+    humanoid.action_queue[idle_index].direction = idle_direction;
+    humanoid->queueAction(WalkAction(ix, iy)->setMustHappen(true), idle_index - 1);
+  } else {
+    action.current_bench_distance = null;
+    var num_actions_prior = action_queue_leave_bench(action, humanoid);
+    humanoid->queueAction(WalkAction(ix, iy)->setMustHappen(true), num_actions_prior);
+    humanoid->queueAction(IdleAction()->setDirection(idle_direction)->setMustHappen(true),
+        num_actions_prior + 1);
+  }
+});
+
+var action_queue_is_standing = permanent("action_queue_is_standing")( function(action) {
+  return ! action.current_bench_distance;
+});
+
+var action_queue_on_leave = permanent("action_queue_on_leave")( function(action, humanoid) {
+  action.is_in_queue = false;
+  if( action.reserve_when_done ) {
+    action.reserve_when_done->addReservedUser(humanoid);
+  }
+  for( i, current_action in ipairs(humanoid.action_queue) ) {
+    if( current_action == action ) {
+      interrupt_head(humanoid, i);
+      return;
+    }
+  }
+  error("Queue action not in action_queue");
+});
+
+// While queueing one could get thirsty.
+var action_queue_get_soda = permanent("action_queue_get_soda")(
+function(action, humanoid, machine, mx, my, fun_after_use) {
+  var num_actions_prior;
+  if( action->isStanding() ) {
+    num_actions_prior = action_queue_finish_standing(action, humanoid);
+  } else {
+    num_actions_prior = action_queue_leave_bench(action, humanoid);
+  }
+
+  // Callback function used after the drinks machine has been used.
+  var /*persistable:action_queue_get_soda_after_use*/ function after_use() {
+    fun_after_use(); // Defined in patient:tickDay
+    // If the patient is still in the queue, insert an idle action so that
+    // change_position can do its work.
+    // Note that it is inserted after the currently executing use_object action.
+    if( action.is_in_queue ) {
+      humanoid->queueAction(IdleAction()->setMustHappen(true), 1);
+      action_queue_on_change_position(action, humanoid);
+    }
+  }
+
+  // Walk to the machine and then use it.
+  humanoid->queueAction(WalkAction(mx, my)->setMustHappen(true), num_actions_prior);
+  humanoid->queueAction(UseObjectAction(machine)->setAfterUse(after_use)
+      ->setMustHappen(true), num_actions_prior + 1);
+  machine->addReservedUser(humanoid);
+
+  // Make sure no one thinks we're sitting down anymore.
+  action.current_bench_distance = null;
+});
+
+var action_queue_interrupt = permanent("action_queue_interrupt")( function(action, humanoid) {
+  if( action.is_in_queue ) {
+    action.queue->removeValue(humanoid);
+    if( action.reserve_when_done ) {
+      action.reserve_when_done->updateDynamicInfo();
+    }
+  }
+  if( action.reserve_when_done ) {
+    if( action.reserve_when_done->isReservedFor(humanoid) ) {
+      action.reserve_when_done->removeReservedUser(humanoid);
+    }
+  }
+  humanoid->finishAction();
+});
+
+var function action_queue_start(action, humanoid) {
+  var queue = action.queue;
+
+  if( action.done_init ) {
+    return;
+  }
+  action.done_init = true;
+  action.must_happen = true;
+  action.on_interrupt = action_queue_interrupt;
+  action.onChangeQueuePosition = action_queue_on_change_position;
+  action.onLeaveQueue = action_queue_on_leave;
+  action.onGetSoda = action_queue_get_soda;
+  action.isStanding = action_queue_is_standing;
+
+  action.is_in_queue = true;
+  queue->unexpect(humanoid);
+  queue->push(humanoid, action);
+
+  var door = action.reserve_when_done;
+  if( door ) {
+    door->updateDynamicInfo();
+    if( class.is(humanoid, Patient) ) {
+      humanoid->updateDynamicInfo(_S.dynamic_info.patient.actions.queueing_for->format(door.room.room_info.name));
+    }
+  }
+  humanoid->queueAction(IdleAction()->setMustHappen(true)->setIsLeaving(humanoid->isLeaving()), 0);
+  action->onChangeQueuePosition(humanoid);
+
+  if( queue.same_room_priority ) {
+    queue.same_room_priority->getRoom()->tryAdvanceQueue();
+  }
+}
+
+return action_queue_start;

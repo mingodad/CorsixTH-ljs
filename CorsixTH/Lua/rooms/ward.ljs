@@ -1,0 +1,258 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var room = {};
+room.id = "ward";
+room.level_config_id = 9;
+room.class = "WardRoom";
+room.name = _S.rooms_short.ward;
+room.tooltip = _S.tooltip.rooms.ward;
+room.long_name = _S.rooms_long.ward;
+room.objects_additional = {
+  "extinguisher",
+  "radiator",
+  "plant",
+  "desk",
+  "bin",
+  "bed" };
+room.objects_needed = { desk = 1, bed = 1 };
+room.build_preview_animation = 910;
+room.categories = {
+  treatment = 2,
+  diagnosis = 9,
+};
+room.minimum_size = 6;
+room.wall_type = "white";
+room.floor_tile = 21;
+room.swing_doors = true;
+room.required_staff = {
+  Nurse = 1,
+};
+
+room.call_sound = "reqd009.wav";
+
+class ("WardRoom") (Room);
+
+//-@type WardRoom
+var WardRoom = _G["WardRoom"];
+
+function WardRoom::WardRoom(...) {
+  this->Room(...);
+  this.staff_member_set = {};
+}
+
+function WardRoom::roomFinished() {
+  var fx, fy = this->getEntranceXY(true);
+  var objects = this.world->findAllObjectsNear(fx, fy);
+  var beds = 0;
+  var desks = 0;
+  for( object, _ in pairs(objects) ) {
+    if( object.object_type.id == "bed" ) {
+      ++beds    ;
+    }
+    if( object.object_type.id == "desk" ) {
+      ++desks    ;
+    }
+  }
+  this.maximum_staff = {
+    Nurse = desks,
+  };
+  this.maximum_patients = beds;
+  if( ! this.hospital->hasStaffOfCategory("Nurse") ) {
+    this.world.ui.adviser
+    ->say(_A.room_requirements.ward_need_nurse);
+  }
+  Room.roomFinished(this);
+}
+
+function WardRoom::getMaximumStaffCriteria() {
+  return this.maximum_staff;
+}
+
+function WardRoom::commandEnteringStaff(humanoid) {
+  this.staff_member_set[humanoid] = true;
+  this->doStaffUseCycle(humanoid);
+  return Room.commandEnteringStaff(this, humanoid, true);
+}
+
+function WardRoom::doStaffUseCycle(humanoid) {
+  var meander_time = math.random(4, 10);
+  humanoid->setNextAction(MeanderAction()->setCount(meander_time));
+
+  var obj, ox, oy = this.world->findFreeObjectNearToUse(humanoid, "desk");
+  if( obj ) {
+    obj.reserved_for = humanoid;
+    humanoid->walkTo(ox, oy);
+    if( obj.object_type.id == "desk" ) {
+      var desk_use_time = math.random(7, 14);
+      var desk_loop = /*persistable:ward_desk_loop_callback*/ function() {
+        --desk_use_time    ;
+        if( desk_use_time == 0 ) {
+          this->doStaffUseCycle(humanoid);
+        }
+      };
+
+      humanoid->queueAction(UseObjectAction(obj)->setLoopCallback(desk_loop));
+    }
+  }
+
+  var num_meanders = math.random(2, 4);
+  var meanders_loop = /*persistable:ward_meander_loop_callback*/ function(action) {
+    --num_meanders    ;
+    if( num_meanders == 0 ) {
+      this->doStaffUseCycle(humanoid);
+    }
+  };
+  humanoid->queueAction(MeanderAction()->setLoopCallback(meanders_loop));
+}
+
+
+// TODO the nurse should not leave the ward if there are beds in use, therefore prevent her from being picked up
+// and have a system that stops patients entering the ward if she is in need of taking a break or being called elsewhere.
+function WardRoom::commandEnteringPatient(patient) {
+  var staff = next(this.staff_member_set) || this.staff_member;
+  var bed, pat_x, pat_y = this.world->findFreeObjectNearToUse(patient, "bed");
+  this->setStaffMembersAttribute("dealing_with_patient", null);
+  if( ! bed ) {
+    patient->setNextAction(this->createLeaveAction());
+    patient->queueAction(this->createEnterAction(patient));
+    print("Warning: A patient was called into the ward even though there are no free beds.");
+  } else {
+    bed.reserved_for = patient;
+    this->countWorkingNurses();
+    var length = (math.random(200, 800) * (1.5 - staff.profile.skill))  / this.nursecount; // reduce time in ward if there is more than one nurse on duty
+    var /*persistable:ward_loop_callback*/ function loop_callback(action) {
+    // TODO Perhaps it should take longer if there are more used beds!
+      if( length <= 0 ) {
+        action.prolonged_usage = false;
+      }
+      --length    ;
+    }
+    var after_use = /*persistable:ward_after_use*/ function() {
+      this->dealtWithPatient(patient);
+    };
+    patient->walkTo(pat_x, pat_y);
+    patient->queueAction(UseObjectAction(bed)->setProlongedUsage(true)->setLoopCallback(loop_callback)
+        ->setAfterUse(after_use));
+  }
+
+  return Room.commandEnteringPatient(this, patient);
+}
+
+// Returns the staff member with the minimum amount of skill. Perhaps we should consider tiredness too
+function WardRoom::getStaffMember() {
+  var staff;
+  for( staff_member, _ in pairs(this.staff_member_set) ) {
+    if( staff && ! staff.fired ) {
+      if( staff.profile.skill > staff_member.profile.skill ) {
+        staff = staff_member;
+      }
+    } else {
+      staff = staff_member;
+    }
+  }
+  return staff;
+}
+
+function WardRoom::setStaffMember(staff) {
+  this.staff_member_set[staff] = true;
+}
+
+function WardRoom::countWorkingNurses() {
+  var staff = next(this.staff_member_set);
+  this.nursecount = 0;
+  for( staff_member, _ in pairs(this.staff_member_set) ) {
+    if( staff ) {
+      staff = staff_member;
+      this.nursecount = this.nursecount + 1;
+    }
+  }
+}
+
+function WardRoom::setStaffMembersAttribute(attribute, value) {
+  for( staff_member, _ in pairs(this.staff_member_set) ) {
+    staff_member[attribute] = value;
+  }
+}
+
+function WardRoom::onHumanoidLeave(humanoid) {
+  this.staff_member_set[humanoid] = null;
+  Room.onHumanoidLeave(this, humanoid);
+}
+
+function WardRoom::afterLoad(old, new) {
+  if( old < 11 ) {
+    // Make sure all three tiles outside of the door are unbuildable.
+    var door = this.door;
+    var x = door.tile_x;
+    var y = door.tile_y;
+    var dir = door.direction;
+    var map = this.world.map.th;
+    var flags = {};
+
+    var function checkLocation(xpos, ypos) {
+      if( this.world->getRoom(xpos, ypos) || ! map->getCellFlags(xpos, ypos, flags).passable ) {
+        var message = "Warning: An update has resolved a problem concerning " ..
+            "swing doors, but not all tiles adjacent to them could be fixed.";
+        this.world.ui->addWindow(UIInformation(this.world.ui, {message}));
+        return false;
+      }
+      return true;
+    }
+    if( dir == "west" ) { // In west or east wall
+      if( this.world->getRoom(x, y) == this ) { // In west wall
+        if( checkLocation(x - 1, y + 1) ) {
+          map->setCellFlags(x - 1, y + 1, {buildable = false});
+        }
+      } else { // East wall
+        if( checkLocation(x, y + 1) ) {
+          map->setCellFlags(x, y + 1, {buildable = false});
+        }
+      }
+    } else { // if dir == "north", North or south wall
+      if( this.world->getRoom(x, y) == this ) { // In north wall
+        if( checkLocation(x + 1, y - 1) ) {
+          map->setCellFlags(x + 1, y - 1, {buildable = false});
+        }
+      } else { // South wall
+        if( checkLocation(x + 1, y) ) {
+          map->setCellFlags(x + 1, y, {buildable = false});
+        }
+      }
+    }
+  }
+  if( old < 74 ) {
+    // add some new variables
+    this.staff_member_set = {};
+    this.nursecount = 0;
+    // reset any wards that already exist
+    this->roomFinished();
+    // if there is already a nurse in the ward
+    // make her leave so she gets counted properly
+    var nurse = this.staff_member;
+    if( nurse ) {
+      nurse->setNextAction(this->createLeaveAction());
+      nurse->queueAction(MeanderAction());
+    }
+  }
+  Room.afterLoad(this, old, new);
+}
+
+return room;

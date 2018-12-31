@@ -1,0 +1,291 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("UIFax") (UIFullscreen);
+
+//-@type UIFax
+var UIFax = _G["UIFax"];
+
+function UIFax::UIFax(ui, icon) {
+  this->UIFullscreen(ui);
+  var gfx = ui.app.gfx;
+  this.background = gfx->loadRaw("Fax01V", 640, 480);
+  var palette = gfx->loadPalette("QData", "Fax01V.pal");
+  palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+  this.panel_sprites = gfx->loadSpriteTable("QData", "Fax02V", true, palette);
+  this.fax_font = gfx->loadFont("QData", "Font51V", false, palette);
+  this.icon = icon;
+  this.message = icon.message || {};
+  this.owner = icon.owner;
+
+  this.code = "";
+
+  // Add choice buttons
+  var choices = this.message.choices;
+  this.choice_buttons = {};
+  var orig_y = 175;
+  if( choices ) {
+    for( i = 1, #choices ) {
+      var y = orig_y + ((i-1) + (3-#choices)) * 48;
+      var choice = choices[i].choice;
+      // NB: both nil and true result in enabled; also handle old "disabled" choice
+      var enabled = (choices[i].enabled != false) && (choice != "disabled");
+      var /*persistable:fax_choice_button*/ function callback() {
+        this->choice(i);
+      }
+      this.choice_buttons[i] = this->addPanel(17, 492, y)->makeButton(0, 0, 43, 43, 18, callback)
+        ->setDisabledSprite(19)->enable(enabled);
+    }
+  }
+
+  // Close button
+  this->addPanel(0, 598, 440)->makeButton(0, 0, 26, 26, 16, this.close)->setTooltip(_S.tooltip.fax.close);
+
+  this->addPanel(0, 471, 349)->makeButton(0, 0, 87, 20, 14, this.cancel); // Cancel code button
+  this->addPanel(0, 474, 372)->makeButton(0, 0, 91, 27, 15, this.validate); // Validate code button
+
+  this->addPanel(0, 168, 348)->makeButton(0, 0, 43, 10, 1, this.correct); // Correction button
+
+  var function button(char) {
+    return /*persistable:fax_button*/ function() { this->appendNumber(char); };
+  }
+
+  this->addPanel(0, 220, 348)->makeButton(0, 0, 43, 10,  2, button("1"))->setSound("Fax_1.wav");
+  this->addPanel(0, 272, 348)->makeButton(0, 0, 44, 10,  3, button("2"))->setSound("Fax_2.wav");
+  this->addPanel(0, 327, 348)->makeButton(0, 0, 43, 10,  4, button("3"))->setSound("Fax_3.wav");
+
+  this->addPanel(0, 219, 358)->makeButton(0, 0, 44, 10,  5, button("4"))->setSound("Fax_4.wav");
+  this->addPanel(0, 272, 358)->makeButton(0, 0, 43, 10,  6, button("5"))->setSound("Fax_5.wav");
+  this->addPanel(0, 326, 358)->makeButton(0, 0, 44, 10,  7, button("6"))->setSound("Fax_6.wav");
+
+  this->addPanel(0, 218, 370)->makeButton(0, 0, 44, 11,  8, button("7"))->setSound("Fax_7.wav");
+  this->addPanel(0, 271, 370)->makeButton(0, 0, 44, 11,  9, button("8"))->setSound("Fax_8.wav");
+  this->addPanel(0, 326, 370)->makeButton(0, 0, 44, 11, 10, button("9"))->setSound("Fax_9.wav");
+
+  this->addPanel(0, 217, 382)->makeButton(0, 0, 45, 12, 11, button("*"));
+  this->addPanel(0, 271, 382)->makeButton(0, 0, 44, 11, 12, button("0"))->setSound("Fax_0.wav");
+  this->addPanel(0, 326, 382)->makeButton(0, 0, 44, 11, 13, button("#"));
+}
+
+function UIFax::updateChoices() {
+  var choices = this.message.choices;
+  for( i, button in ipairs(this.choice_buttons) ) {
+    // NB: both nil and true result in enabled; also handle old "disabled" choice
+    var enabled = (choices[i].enabled != false) && (choices[i].choice != "disabled");
+    button->enable(enabled);
+  }
+}
+
+function UIFax::draw(canvas, x, y) {
+  this.background->draw(canvas, this.x + x, this.y + y);
+  UIFullscreen.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+
+  if( this.message ) {
+    var last_y = y + 40;
+    for( _, message in ipairs(this.message) ) {
+      last_y = this.fax_font->drawWrapped(canvas, message.text, x + 190,
+                                         last_y + (message.offset || 0), 330,
+                                         "center");
+    }
+    var choices = this.message.choices;
+    if( choices ) {
+      var orig_y = y + 190;
+      for( i = 1, #choices ) {
+        last_y = orig_y + ((i - 1) + (3 - #choices)) * 48;
+        this.fax_font->drawWrapped(canvas, choices[i].text, x + 190,
+                                  last_y + (choices[i].offset || 0), 300);
+      }
+    }
+  }
+}
+
+//A choice was made for the fax.
+//!param choice_number (integer) Number of the choice
+function UIFax::choice(choice_number) {
+  var choices = this.message.choices;
+  var choice, additionalInfo;
+  if( choices && choice_number >= 1 && choice_number <= #choices ) {
+    choice = choices[choice_number].choice;
+    additionalInfo = choices[choice_number].additionalInfo;
+  } else {
+    choice = "disabled";
+    additionalInfo = null;
+  }
+
+  var owner = this.owner;
+  if( owner ) {
+    // A choice was made, the patient is no longer waiting for a decision
+    owner->setMood("patient_wait", "deactivate");
+    owner.message_callback = null;
+    if( choice == "send_home" ) {
+      owner->goHome("kicked");
+      if( owner.diagnosed ) {
+        // No treatment rooms
+        owner->updateDynamicInfo(_S.dynamic_info.patient.actions.no_treatment_available);
+      } else {
+        // No diagnosis rooms
+        owner->updateDynamicInfo(_S.dynamic_info.patient.actions.no_diagnoses_available);
+      }
+    } else if( choice == "wait" ) {
+      // Wait two months before going home
+      owner.waiting = 60;
+      if( owner.diagnosed ) {
+        // Waiting for treatment room
+        owner->updateDynamicInfo(_S.dynamic_info.patient.actions.waiting_for_treatment_rooms);
+      } else {
+        // Waiting for diagnosis room
+        owner->updateDynamicInfo(_S.dynamic_info.patient.actions.waiting_for_diagnosis_rooms);
+      }
+    } else if( choice == "guess_cure" ) {
+      owner->setDiagnosed();
+      if( owner->agreesToPay(owner.disease.id) ) {
+        owner->setNextAction(SeekRoomAction(owner.disease.treatment_rooms[1])->enableTreatmentRoom());
+      } else {
+        owner->goHome("over_priced", owner.disease.id);
+      }
+    } else if( choice == "research" ) {
+      owner->setMood("idea", "activate");
+      owner->setNextAction(SeekRoomAction("research"));
+    }
+  }
+  var vip_ignores_refusal = math.random(1, 2);
+  if( choice == "accept_emergency" ) {
+    this.ui.app.world->newObject("helicopter", this.ui.hospital, "north");
+    this.ui->addWindow(UIWatch(this.ui, "emergency"));
+    this.ui->playAnnouncement(this.ui.hospital.emergency.disease.emergency_sound);
+    this.ui.adviser->say(_A.information.emergency);
+  } else if( choice == "refuse_emergency" ) {
+    this.ui.app.world->nextEmergency();
+  // VIP may choose to visit anyway if he is refused too often
+  } else if( (this.ui.hospital.vip_declined > 2 && vip_ignores_refusal == 2) && choice == "refuse_vip" ) {
+    this.ui.hospital.num_vips = this.ui.hospital.num_vips + 1;
+    this.ui.app.world->spawnVIP(additionalInfo.name);
+    this.ui.hospital.vip_declined = 0;
+  } else if( choice == "refuse_vip" ) {
+    this.ui.app.world->nextVip(); // don't start an inspection
+    this.ui.hospital.vip_declined = this.ui.hospital.vip_declined + 1;
+  } else if( choice == "accept_vip" ) {
+    this.ui.hospital.num_vips = this.ui.hospital.num_vips + 1;
+    this.ui.app.world->spawnVIP(additionalInfo.name);
+  } else if( choice == "declare_epidemic" ) {
+    var epidemic = this.ui.hospital.epidemic;
+    if( epidemic ) {
+      epidemic->resolveDeclaration();
+    }
+  } else if( choice == "cover_up_epidemic" ) {
+    var epidemic = this.ui.hospital.epidemic;
+    if( epidemic ) {
+      epidemic->startCoverUp();
+    }
+  } else if( choice == "accept_new_level" ) {
+    // Set the new salary.
+    this.ui.hospital.player_salary = this.ui.hospital.salary_offer;
+    if( tonumber(this.ui.app.world.map.level_number) ) {
+      this.ui.app->loadLevel(this.ui.app.world.map.level_number + 1, this.ui.app.map.difficulty);
+    } else {
+      for( i, level in ipairs(this.ui.app.world.campaign_info.levels) ) {
+        if( this.ui.app.world.map.level_number == level ) {
+          var next_level = this.ui.app.world.campaign_info.levels[i + 1];
+          var level_info, _ = this.ui.app->readLevelFile(next_level);
+          if( level_info ) {
+            this.ui.app->loadLevel(next_level, null, level_info.name,
+                     level_info.map_file, level_info.briefing);
+            break;
+          }
+        }
+      }
+    }
+  } else if( choice == "return_to_main_menu" ) {
+    this.ui.app.moviePlayer->playWinMovie();
+    this.ui.app->loadMainMenu();
+  }
+  this.icon->removeMessage();
+  this->close();
+}
+
+function UIFax::cancel() {
+  this.code = "";
+}
+
+function UIFax::correct() {
+  if( this.code != "" ) {
+    this.code = string.sub(this.code, 1, -2); //Remove last character
+  }
+}
+
+function UIFax::validate() {
+  if( this.code == "" ) {
+    return;
+  }
+  var code = this.code;
+  this.code = "";
+  var code_n = (tonumber(code) || 0) / 10**5;
+  var x = math.abs((code_n ** 5.00001 - code_n ** 5) * 10**5 - code_n ** 5);
+  print("Code typed on fax:", code);
+  if( code == "24328" ) {
+    // Original game cheat code
+    this.ui.adviser->say(_A.cheats.th_cheat);
+    this.ui->addWindow(UICheats(this.ui));
+  } else if( code == "112" ) {
+    // simple, unobfuscated cheat for everyone :)
+    this.ui->playAnnouncement("rand*.wav");
+  } else if( 27868.3 < x && x < 27868.4 ) {
+    // Roujin's challenge cheat
+    var hosp = this.ui.hospital;
+    if( ! hosp.spawn_rate_cheat ) {
+      this.ui.adviser->say(_A.cheats.roujin_on_cheat);
+      hosp.spawn_rate_cheat = true;
+    } else {
+      this.ui.adviser->say(_A.cheats.roujin_off_cheat);
+      hosp.spawn_rate_cheat = null;
+    }
+  } else {
+    // no valid cheat entered
+    this.ui->playSound("fax_no.wav");
+    return;
+  }
+  this.ui->playSound("fax_yes.wav");
+
+  // TODO: Other cheats (preferably with slight obfuscation, as above)
+}
+
+function UIFax::appendNumber(number) {
+  this.code = this.code .. number;
+}
+
+function UIFax::close() {
+  var world = this.ui.app.world;
+  this.icon.fax = null;
+  this.icon->adjustToggle();
+  UIFullscreen.close(this);
+  if( world && world->isCurrentSpeed("Pause") ) {
+    world->setSpeed(world.prev_speed);
+  }
+}
+
+function UIFax::afterLoad(old, new) {
+  UIFullscreen.afterLoad(this, old, new);
+  if( old < 59 ) {
+    // self.choice_buttons added, changes to disabled buttons.
+    // Since it's hard to add retroactively, just close any opened fax window.
+    this->close();
+  }
+}

@@ -1,0 +1,133 @@
+/* Copyright (c) 2010 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var io_open, assert, setmetatable, string_char, table_concat
+    = io.open, assert, setmetatable, string.char, table.concat;
+
+module ("spritesheet");
+var mt = {__index = _M};
+
+function open(filename_tab, filename_dat, is_complex) {
+  return setmetatable({
+    tab = assert(io_open(filename_tab, "wb")),
+    dat = assert(io_open(filename_dat, "wb")),
+    encode = is_complex && encodeComplex || encodeSimple,
+  }, mt);
+}
+
+function close(ss) {
+  ss.tab->close();
+  ss.dat->close();
+  return ss;
+}
+
+function writeDummy(ss) {
+  ss.tab->write("\0\0\0\0\0\0");
+  return ss;
+}
+
+// Convert an integer into a little endian byte string
+var function uint4(value) {
+  var b0, b1, b2, b3;
+  b0 = value % 0x100;
+  value = (value - b0) / 0x100;
+  b1 = value % 0x100;
+  value = (value - b1) / 0x100;
+  b2 = value % 0x100;
+  value = (value - b2) / 0x100;
+  return string_char(b0, b1, b2, value);
+}
+
+function write(ss, width, height, pixels) {
+  ss.tab->write(uint4(ss.dat->seek()));
+  ss.tab->write(string_char(width, height));
+  ss.dat->write(ss.encode(width, height, pixels));
+  return ss;
+}
+
+function encodeSimple(width, height, data) {
+  error ("TODO");
+}
+
+function encodeComplex(width, height, data) {
+  var result = {};
+  var run_start = 1;
+  var run_byte = false;
+  var prev = false;
+  var function flush_run(i) {
+    if( run_byte == false ) {
+      while( i - run_start > 63 ) {
+        result[#result + 1] = "\63";
+        result[#result + 1] = data->sub(run_start, run_start + 62);
+        run_start +=   63;
+      }
+      if( i != run_start ) {
+        result[#result + 1] = string_char(i - run_start);
+        result[#result + 1] = data->sub(run_start, i - 1);
+      }
+    } else {
+      if( run_byte == 0xFF ) {
+        while( i - run_start >= 63 ) {
+          result[#result + 1] = "\191";
+          run_start +=   63;
+        }
+        if( i != run_start ) {
+          result[#result + 1] = string_char(i - run_start + 128);
+        }
+      } else {
+        while( i - run_start >= 255 ) {
+          result[#result + 1] = "\255\255";
+          result[#result + 1] = string_char(run_byte);
+          run_start +=   255;
+        }
+        if( i != run_start ) {
+          var d = i - run_start;
+          if( 4 <= d && d <= 67 ) {
+            result[#result + 1] = string_char(d + 60);
+            result[#result + 1] = string_char(run_byte);
+          } else if( 68 <= d && d <= 130 ) {
+            result[#result + 1] = string_char(d + 124);
+            result[#result + 1] = string_char(run_byte);
+          } else {
+            result[#result + 1] = "\255";
+            result[#result + 1] = string_char(d);
+            result[#result + 1] = string_char(run_byte);
+          }
+        }
+      }
+      run_byte = false;
+    }
+    run_start = i;
+  }
+  for( i = 2, #data, 1 ) {
+    var byte = data->byte(i);
+    if( run_byte ) {
+      if( byte != run_byte ) {
+        flush_run(i);
+      }
+    } else if( byte == prev && i - run_start >= 4 && data->byte(i - 3) == byte && data->byte(i - 2) == byte ) {
+      flush_run(i - 3);
+      run_byte = byte;
+    }
+    prev = byte;
+  }
+  flush_run(#data + 1);
+  return table_concat(result);
+}

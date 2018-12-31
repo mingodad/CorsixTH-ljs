@@ -1,0 +1,217 @@
+/* Copyright (c) 2013 Mark (Mark L) Lawlor
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Customise window used in the main menu and ingame.
+class ("UIFolder") (UIResizable);
+
+//-@type UIFolder
+var UIFolder = _G["UIFolder"];
+
+var col_bg = {
+  red = 154,
+  green = 146,
+  blue = 198,
+};
+
+var col_shadow = {
+  red = 134,
+  green = 126,
+  blue = 178,
+};
+
+var col_caption = {
+  red = 174,
+  green = 166,
+  blue = 218,
+};
+
+function UIFolder::UIFolder(ui, mode) {
+  this->UIResizable(ui, 360, 240, col_bg);
+
+  var app = ui.app;
+  this.mode = mode;
+  this.modal_class = mode == "menu" && "main menu" || "options" || "folders";
+  this.on_top = mode == "menu";
+  this.esc_closes = true;
+  this.resizable = false;
+  this->setDefaultPosition(0.5, 0.25);
+  this.default_button_sound = "selectx.wav";
+  this.app = app;
+
+  // Window parts definition
+  // Title
+  this->addBevelPanel(80, 10, 200, 20, col_caption)->setLabel(_S.folders_window.caption)
+    .lowered = true;
+
+  // Location of original game
+  var built_in = app.gfx->loadMenuFont();
+
+  this->addBevelPanel(20, 50, 130, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.folders_window.data_label)->setTooltip(_S.tooltip.folders_window.data_location)
+    .lowered = true;
+  this->addBevelPanel(160, 50, 180, 20, col_bg)
+    ->setLabel(app.config.theme_hospital_install, built_in)->setAutoClip(true)
+    ->makeButton(0, 0, 180, 20, null, this.buttonBrowseForTHInstall)->setTooltip(_S.tooltip.folders_window.browse_data->format(app.config.theme_hospital_install));
+
+  // Location of font file
+  this->addBevelPanel(20, 75, 130, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.folders_window.font_label)->setTooltip(_S.tooltip.folders_window.font_location)
+    .lowered = true;
+  var tooltip_font = app.config.unicode_font && _S.tooltip.folders_window.browse_font->format(app.config.unicode_font) || _S.tooltip.folders_window.no_font_specified;
+  this->addBevelPanel(160, 75, 180, 20, col_bg)
+    ->setLabel(app.config.unicode_font && app.config.unicode_font || tooltip_font, built_in)->setAutoClip(true)
+    ->makeButton(0, 0, 180, 20, null, this.buttonBrowseForFont)->setTooltip(tooltip_font);
+
+  // Location saves alternative
+  this->addBevelPanel(20, 100, 130, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.folders_window.savegames_label)->setTooltip(_S.tooltip.folders_window.savegames_location)
+    .lowered = true;
+  var tooltip_saves = app.config.savegames && _S.tooltip.folders_window.browse_saves->format(app.config.savegames) || _S.tooltip.folders_window.default;
+  this.saves_panel = this->addBevelPanel(160, 100, 160, 20, col_bg);
+  this.saves_panel->setLabel(app.config.savegames && app.config.savegames || tooltip_saves , built_in)->setAutoClip(true)
+    ->makeButton(0, 0, 160, 20, null, this.buttonBrowseForSavegames)->setTooltip(tooltip_saves);
+  this->addBevelPanel(320, 100, 20, 20, col_bg)->setLabel("X")->makeButton(0, 0, 20, 20, null, this.resetSavegameDir)->setTooltip(_S.tooltip.folders_window.reset_to_default);
+
+  // location for screenshots
+  this->addBevelPanel(20, 125, 130, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.folders_window.screenshots_label)->setTooltip(_S.tooltip.folders_window.screenshots_location)
+    .lowered = true;
+  var tooltip_screenshots = app.config.screenshots && _S.tooltip.folders_window.browse_screenshots->format(app.config.screenshots) || _S.tooltip.folders_window.default;
+  this.screenshots_panel = this->addBevelPanel(160, 125, 160, 20, col_bg);
+  this.screenshots_panel->setLabel(app.config.screenshots && app.config.screenshots || tooltip_screenshots, built_in)->setAutoClip(true)
+    ->makeButton(0, 0, 160, 20, null, this.buttonBrowseForScreenshots)->setTooltip(tooltip_screenshots);
+  this->addBevelPanel(320, 125, 20, 20, col_bg)->setLabel("X")->makeButton(0, 0, 20, 20, null, this.resetScreenshotDir)->setTooltip(_S.tooltip.folders_window.reset_to_default);
+
+ // location for mp3 music files
+  this->addBevelPanel(20, 150, 130, 20, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.folders_window.music_label)->setTooltip(_S.tooltip.folders_window.music_location)
+    .lowered = true;
+  var tooltip_audio = app.config.audio_mp3 && _S.tooltip.folders_window.browse_music->format(app.config.audio_mp3) || _S.tooltip.folders_window.not_specified;
+  this.mp3_panel = this->addBevelPanel(160, 150, 180, 20, col_bg);
+  this.mp3_panel->setLabel(app.config.audio_mp3 && app.config.audio_mp3 || tooltip_audio, built_in)->setAutoClip(true)
+    ->makeButton(0, 0, 160, 20, null, this.buttonBrowseForAudio_mp3)->setTooltip(tooltip_audio);
+  this->addBevelPanel(320, 150, 20, 20, col_bg)->setLabel("X")->makeButton(0, 0, 20, 20, null, this.resetMp3Dir)->setTooltip(_S.tooltip.folders_window.reset_to_default);
+
+  // "Back" button
+  this->addBevelPanel(20, 180, 320, 40, col_bg)->setLabel(_S.folders_window.back)
+    ->makeButton(0, 0, 320, 40, null, this.buttonBack)->setTooltip(_S.tooltip.folders_window.back);
+  this.built_in_font = built_in;
+}
+
+function UIFolder::resetSavegameDir() {
+  var app = TheApp;
+  app.config.savegames = null;
+  app->saveConfig();
+  app->initSavegameDir();
+  this.saves_panel->setLabel(_S.tooltip.folders_window.default, this.built_in_font);
+}
+
+function UIFolder::resetScreenshotDir() {
+  var app = TheApp;
+  app.config.screenshots = null;
+  app->saveConfig();
+  app->initScreenshotsDir();
+  this.screenshots_panel->setLabel(_S.tooltip.folders_window.default, this.built_in_font);
+}
+
+function UIFolder::resetMp3Dir() {
+  var app = TheApp;
+  app.config.audio_mp3 = null;
+  app->saveConfig();
+  app.audio->init();
+  this.mp3_panel->setLabel(_S.tooltip.folders_window.not_specified, this.built_in_font);
+}
+
+function UIFolder::buttonBrowseForFont() {
+  var browser = UIChooseFont(this.ui, this.mode);
+  this.ui->addWindow(browser);
+}
+
+function UIFolder::buttonBrowseForSavegames() {
+  var app = TheApp;
+  var old_path = app.config.savegames;
+  var function callback(path) {
+    if( old_path != path ) {
+      app.config.savegames = path;
+      app->saveConfig();
+      app->initSavegameDir();
+      this.saves_panel->setLabel(app.config.savegames, this.built_in_font);
+    }
+  }
+  var browser = UIDirectoryBrowser(this.ui, this.mode, _S.folders_window.savegames_location, "DirTreeNode", callback);
+  this.ui->addWindow(browser);
+}
+
+function UIFolder::buttonBrowseForTHInstall() {
+  var function callback(path) {
+    var app = TheApp;
+    app.config.theme_hospital_install = path;
+    app->saveConfig();
+    debug.getregistry()._RESTART = true;
+    app.running = false;
+  }
+  var browser = UIDirectoryBrowser(this.ui, this.mode, _S.folders_window.new_th_location, "InstallDirTreeNode", callback);
+  this.ui->addWindow(browser);
+}
+
+function UIFolder::buttonBrowseForScreenshots() {
+  var app = TheApp;
+  var old_path = app.config.savegames;
+  var function callback(path) {
+    if( old_path != path ) {
+      app.config.screenshots = path;
+      app->saveConfig();
+      app->initScreenshotsDir();
+      this.screenshots_panel->setLabel(app.config.screenshots, this.built_in_font);
+    }
+  }
+  var browser = UIDirectoryBrowser(this.ui, this.mode, _S.folders_window.screenshots_location, "DirTreeNode", callback);
+  this.ui->addWindow(browser);
+}
+
+function UIFolder::buttonBrowseForAudio_mp3() {
+  var function callback(path) {
+  var app = TheApp;
+    app.config.audio_mp3 = path;
+    app->saveConfig();
+    app.audio->init();
+    this.mp3_panel->setLabel(app.config.audio_mp3, this.built_in_font);
+  }
+  var browser = UIDirectoryBrowser(this.ui, this.mode, _S.folders_window.music_location, "DirTreeNode", callback);
+  this.ui->addWindow(UIConfirmDialog(this.ui,
+    _S.confirmation.music_warning,
+    /*persistable:mmusic_warning_confirm_dialog*/function() {
+    this.ui->addWindow(browser);
+    }
+    ));
+}
+
+function UIFolder::buttonBack() {
+  this->close();
+  var window = UIOptions(this.ui, "menu");
+  this.ui->addWindow(window);
+}
+
+function UIFolder::close() {
+  UIResizable.close(this);
+  if( this.mode == "menu"  ) {
+    this.ui->addWindow(UIMainMenu(this.ui));
+  }
+}

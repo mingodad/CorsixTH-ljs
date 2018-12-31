@@ -1,0 +1,569 @@
+/* Copyright (c) 2010 Sam Wong
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("CallsDispatcher");
+
+//-@type CallsDispatcher
+var CallsDispatcher = _G["CallsDispatcher"];
+
+var debug = false; // Turn on for debug message
+
+function CallsDispatcher::CallsDispatcher(world) {
+  this.world = world;
+  this.call_queue = {};
+  this.change_callback = {};
+  this.tick = 0;
+}
+
+function CallsDispatcher::onTick() {
+  this.tick = this.tick + 1;
+}
+
+function CallsDispatcher::addChangeCallback(callback, self_value) {
+  this.change_callback[callback] = self_value;
+}
+
+function CallsDispatcher::removeChangeCallback(callback) {
+  this.change_callback[callback] = null;
+}
+
+function CallsDispatcher::onChange() {
+  for( callback, self_value in pairs(this.change_callback) ) {
+    callback(self_value);
+  }
+}
+
+function CallsDispatcher::callForStaff(room) {
+  var missing = room->getMissingStaff(room->getRequiredStaffCriteria());
+  var anyone_missed = false;
+  for( attribute, count in pairs(missing) ) {
+    anyone_missed = true;
+    for( i = 1, count ) {
+      this->callForStaffEachRoom(room, attribute, attribute .. i);
+    }
+  }
+  var sound = room.room_info.call_sound;
+  if( anyone_missed && sound && ! room.sound_played ) {
+    room.world.ui->playAnnouncement(sound);
+    room.sound_played = true;
+  }
+}
+
+function CallsDispatcher::callForStaffEachRoom(room, attribute, key) {
+  if( ! key ) {
+    key = "-";
+  }
+  var new_call = this->enqueue(
+    room,
+    key,
+    _S.calls_dispatcher.staff->format(room.room_info.name, attribute),
+    /*persistable:call_dispatcher_staff_verification*/ function(staff) {
+      return CallsDispatcher.verifyStaffForRoom(room, attribute, staff);
+    },
+    /*persistable:call_dispatcher_staff_priority*/ function(staff) {
+      return CallsDispatcher.getPriorityForRoom(room, attribute, staff);
+    },
+    /*persistable:call_dispatcher_staff_execute*/ function(staff) {
+      return CallsDispatcher.sendStaffToRoom(room, staff);
+    }
+  );
+  return new_call;
+}
+
+// Call for repair
+//!param urgent Announcement should be made
+//!param manual This call should not trigger advisor for "your machine is failing"
+//!param lock_room This is a minor maintence. Rooms needed not to be locked.
+//  If urgent or manual is specified, lock_room will be true automatically
+function CallsDispatcher::callForRepair(object, urgent, manual, lock_room) {
+  lock_room = manual || lock_room;
+
+  var call = {
+    verification = /*persistable:call_dispatcher_repair_verification*/ function(staff) { return false; },
+    priority = /*persistable:call_dispatcher_repair_priority*/ function(staff) { return 1; },
+    execute = /*persistable:call_dispatcher_repair_execute*/ function(staff) { return CallsDispatcher.sendStaffToRepair(object, staff); },
+    object = object,
+    key = "repair",
+    description = _S.calls_dispatcher.repair->format(object.object_type.name),
+    dispatcher = this,
+    created = this.tick,
+    assigned = null,
+    dropped = null
+  };
+
+  object->setRepairingMode(lock_room && true || false);
+  var message;
+  var ui = object.world.ui;
+  if( ! object.world->getLocalPlayerHospital()->hasStaffOfCategory("Handyman") ) {
+    // Advise about hiring Handyman
+    message = _A.warnings.machinery_damaged2;
+  }
+
+  if( ! manual && urgent ) {
+    var room = object->getRoom();
+    var sound = room.room_info.handyman_call_sound;
+    if( sound ) {
+      ui->playAnnouncement(sound);
+      ui->playSound("machwarn.wav");
+    }
+    message = _A.warnings.machines_falling_apart;
+  }
+  if( message ) {
+    ui.adviser->say(message);
+  }
+
+  if( ! this.call_queue[object] ) {
+    this.call_queue[object] = {};
+  }
+  this.call_queue[object]["repair"] = call;
+  return call;
+}
+
+function CallsDispatcher::callForWatering(plant) {
+  var call = {
+    verification = /*persistable:call_dispatcher_watering_verification*/function(staff) {
+      return false; },
+    priority = /*persistable:call_dispatcher_watering_priority*/ function(staff) {
+      return 1; },
+    execute = /*persistable:call_dispatcher_watering_execute*/ function(staff) { return CallsDispatcher.sendStaffToWatering(plant, staff); },
+    object = plant,
+    key = "watering",
+    description = _S.calls_dispatcher.watering->format(plant.tile_x, plant.tile_y),
+    dispatcher = this,
+    created = this.tick,
+    assigned = null,
+    dropped = null
+  };
+  if( ! this.call_queue[plant] ) {
+    this.call_queue[plant] = {};
+  }
+  this.call_queue[plant]["watering"] = call;
+  return call;
+}
+
+/* Queues a call for vaccination of a patient
+  @param patient (Patient) the patient who wishes to be vaccinated
+  @return call (table) the call which was queued */
+function CallsDispatcher::callNurseForVaccination(patient) {
+  var call = {
+    object = patient,
+    key = "vaccinate",
+    description = "Vaccinating patient at: " ..
+        tostring(patient.tile_x) .. "," .. tostring(patient.tile_y),
+    verification = /*persistable:call_dispatcher_vaccinate_verification*/ function(staff) {
+      return CallsDispatcher.verifyStaffForVaccination(patient, staff);
+    },
+    priority = /*persistable:call_dispatcher_vaccinate_priority*/ function(staff) {
+      return CallsDispatcher.getPriorityForVaccination(patient,staff);
+    },
+    execute = /*persistable:call_dispatcher_vaccinate_execute*/ function(staff) {
+      return CallsDispatcher.sendNurseToVaccinate(patient, staff);
+    },
+    dispatcher = this,
+    created = this.tick,
+    assigned = null,
+    dropped = null
+  };
+  if( ! this.call_queue[patient] ) {
+    this.call_queue[patient] = {};
+  }
+  this.call_queue[patient]["vaccinate"] = call;
+
+  return call;
+}
+
+/*Determines if a member of staff is suitable to vaccinate a patient they
+  must be a nurse and not busy or too far away.
+  @param patient (Patient) the patient calling for vaccination
+  @param staff (Staff) staff member to verify if suitable to vaccinate
+  @return true if suitable for vaccination false otherwise (boolean) */
+function CallsDispatcher.verifyStaffForVaccination(patient, staff) {
+  // If staff is not a nurse, or nurse is busy, or patient is busy, cannot vaccinate.
+  if( staff.humanoid_class != "Nurse" || ! staff->isIdle() ||
+      staff->getRoom() || patient->getRoom() ) {
+    return false;
+  }
+
+  // Test proximity of staff and patient.
+  var px,py = patient.tile_x, patient.tile_y;
+  var nx,ny = staff.tile_x, staff.tile_y;
+
+  // If any of the nurse or the patient tiles are nil
+  if( ! px || ! py || ! nx || ! ny ) { return false; }
+
+  var x_diff = math.abs(px - nx);
+  var y_diff = math.abs(py - ny);
+  var test_radius = 5;
+
+  // Test if the patient's room is still empty in case they are just entering
+  // a room when they call for a staff to vaccinate them
+  return x_diff <= test_radius && y_diff <= test_radius;
+}
+
+/* Determine which nurse has the highest priority to vaccinate a patient
+  the patient should be easily reachable from the nurse
+  @param patient (Patient) the patient calling for vaccination
+  @param nurse (Staff, humanoid_class Nurse) the nurse to verify if they
+  have priority to vaccinate
+  @return score (Integer) lowest score has higher priority to vaccinate */
+function CallsDispatcher.getPriorityForVaccination(patient, nurse) {
+  assert(nurse.humanoid_class == "Nurse");
+  //Lower the priority "score" the more urgent it is
+  //The closest nurse to the patient has the highest priority for vaccination
+  //Any nurse who cannot reach the paitient suffers a priority penalty
+  var score = 0;
+  var nil_penalty = 10000;
+  var x, y = patient.tile_x, patient.tile_y;
+
+  // Nurses prefer to vaccinate the closest patient
+  var distance =
+    patient.world->getPathDistance(nurse.tile_x, nurse.tile_y, x, y);
+  if( distance ) {
+    score +=   distance;
+  } else {
+    score +=   nil_penalty;
+  }
+  return score;
+}
+
+/* Once a nurse has been verified and priority decided do the actions to
+  perform the actually vaccination, delegated to Epidemic class (@see
+  Epidemic:createVaccinationActions) @param patient (Patient) the patient calling
+  for vaccination @param nurse (Staff, humanoid_class Nurse) the nurse to perform
+  the vaccination actions */
+function CallsDispatcher.sendNurseToVaccinate(patient, nurse) {
+  assert(nurse.humanoid_class == "Nurse");
+
+  var epidemic = nurse.hospital.epidemic;
+  if( epidemic ) {
+    epidemic->createVaccinationActions(patient,nurse);
+  } else {
+    // The epidemic may have ended before the call can be executed
+    // so just finish the call immediately
+    CallsDispatcher.queueCallCheckpointAction(nurse);
+    nurse->queueAction(AnswerCallAction());
+    nurse->finishAction();
+    patient.reserved_for = null;
+  }
+}
+
+
+// Enqueue the call
+// returns: True if the call is inserted and queued, but not served
+//          False if the call is served right away, or has been queued and assigned
+function CallsDispatcher::enqueue(object, key, description, verification, priority, execute) {
+  if( this.call_queue[object] && this.call_queue[object][key] ) {
+    // already queued
+    return this.call_queue[object][key].assigned && true || false;
+  } else if( ! this.call_queue[object] ) {
+    this.call_queue[object] = {};
+  }
+
+  var call = {
+    verification = verification,
+    priority = priority,
+    execute = execute,
+    object = object,
+    key = key,
+    description = description,
+    dispatcher = this,
+    created = this.tick
+  };
+  this.call_queue[object][key] = call;
+
+  return ! this->findSuitableStaff(call);
+}
+
+// Find suitable (best) staff for working on a specific call
+// True
+function CallsDispatcher::findSuitableStaff(call) {
+  if( call.dropped ) {
+    // If a call was thought needed to be reinserted, but actually it was dropped...
+    return;
+  }
+
+  // TODO: Preempt staff those even on_call already.
+  //       Say - when an machine broke down, preempt the nearby handyman for repairing
+  //         even if he was going to water a far away plant
+  // TODO: Doctor could go to other room with real needs, even there are patients queued up
+  //       (think of emergency? or surgeons still in GP office?)
+  var min_score = 2**30;
+  var min_staff = null;
+  for( _, e in ipairs(this.world.entities) ) {
+    if( class.is(e, Staff) ) {
+      if( e.humanoid_class != "Handyman" ) {
+        var score = call.verification(e) && call.priority(e) || null;
+        if( score != null && score < min_score ) {
+          min_score = score;
+          min_staff = e;
+        }
+      }
+    }
+  }
+
+  if( min_staff ) {
+    if( debug ) { CallsDispatcher.dumpCall(call, 'executed right away'); }
+    this->executeCall(call, min_staff);
+    return true;
+  } else {
+    if( debug ) { CallsDispatcher.dumpCall(call, 'queued'); this->dump(this.call_queue); }
+    this->onChange();
+    return false;
+  }
+}
+
+// Find the best call for a staff to work on.
+// When a staff goes to meandering mode, it should call this function to look for new call
+// Return true if a call is answered. False if there is no suitable call waiting and the staff is really free.
+function CallsDispatcher::answerCall(staff) {
+  var min_score = 2**30;
+  var min_call = null;
+  assert(! staff.on_call, "Staff should be idea before he can answer another call");
+  assert(staff.hospital, "Staff should still be a member of the hospital to answer a call");
+
+  if( staff.humanoid_class == "Handyman" ) {
+   staff->searchForHandymanTask();
+   return true;
+  }
+  // Find the call with the highest priority (smaller means more urgency)
+  //   if the staff satisfy the criteria
+  for( _, queue in pairs(this.call_queue) ) {
+    for( _, call in pairs(queue) ) {
+      var score = call.verification(staff) && call.priority(staff) || null;
+      if( score != null ) {
+        if( call.assigned ) { // already being assigned? Can it be preempted?
+          var another_score = call.priority(call.assigned);
+          if( another_score <= score ) {
+            score = null;
+          }
+        }
+        if( score != null && score < min_score ) {
+          min_score = score;
+          min_call = call;
+        }
+      }
+    }
+  }
+
+  if( min_call ) {
+    if( debug ) { this->dump(); CallsDispatcher.dumpCall(min_call, 'answered'); }
+    if( min_call.assigned ) {
+      CallsDispatcher.unassignCall(min_call);
+    }
+    // Check if the object is still in the world, live and not destroy
+    assert(min_call.object.tile_x || min_call.object.x, "An destroyed object still has requested in the dispatching queue. Please check the Entity:onDestroy function");
+    this->executeCall(min_call, staff);
+    return true;
+  }
+  return false;
+}
+
+// Dump the current call table for debugging
+function CallsDispatcher::dump() {
+  print("--- Queue ---");
+  for( _, queue in pairs(this.call_queue) ) {
+    for( _, call in pairs(queue) ) {
+      CallsDispatcher.dumpCall(call, (call.assigned && 'assigned' || 'unassigned'));
+    }
+  }
+  print("----");
+}
+
+function CallsDispatcher.dumpCall(call, message) {
+  if( message != null ) {
+    message = ': ' .. message;
+  } else {
+    message = '';
+  }
+
+  var call_obj = call.object;
+
+  var position = 'nowhere';
+  if( call_obj.tile_x ) {
+    position = call_obj.tile_x .. ',' .. call_obj.tile_y;
+  }
+  if( call_obj.x ) {
+    position = call_obj.x .. ',' .. call_obj.y;
+  }
+  if((class.is(call_obj,Humanoid)) ) {
+    print(call.key .. '@' .. position .. message);
+  } else {
+    print((call_obj.room_info && call_obj.room_info.id || call_obj.object_type.id) ..
+        '-' .. call.key .. '@' .. position .. message);
+  }
+}
+
+// Add checkpoint action
+// All call execution method should add this action in appropriate place to signify
+//   the job is finished.
+// A interrupt handler could be supplied if special handling is needed.
+// If not, the default would be reinsert the call into the queue
+function CallsDispatcher.queueCallCheckpointAction(humanoid, interrupt_handler) {
+  interrupt_handler = interrupt_handler || CallsDispatcher.actionInterruptHandler;
+  return humanoid->queueAction(CallCheckPointAction(humanoid.on_call, interrupt_handler));
+}
+
+// Default checkpoint interrupt handler
+// Reset the assigned status, and find an replacement staff
+function CallsDispatcher.actionInterruptHandler(action, humanoid) {
+  if( action.call.assigned == humanoid ) {
+    action.call.assigned = null;
+    humanoid.on_call = null;
+    humanoid.world.dispatcher->findSuitableStaff(action.call);
+  }
+}
+
+//! Called when a call is completed successfully.
+function CallsDispatcher.onCheckpointCompleted(call) {
+  if( ! call.dropped && call.assigned ) {
+    if( debug ) { CallsDispatcher.dumpCall(call, "completed"); }
+    call.assigned.on_call = null;
+    call.assigned = null;
+    call.dispatcher->dropFromQueue(call.object, call.key);
+  }
+}
+
+function CallsDispatcher::executeCall(call, staff) {
+  assert(! call.assigned, "call to be executed is still assigned");
+  assert(! call.dropped, "call to be executed is dropped");
+  assert(! staff.on_call, "staff was on call and assigned to a new call");
+  call.assigned = staff;
+  staff.on_call = call;
+  this->onChange();
+  call.execute(staff);
+}
+
+// Drop any call associated with the object (and/or key).
+//
+// Expected to be called when the call is no longer needed
+//   (like a machine that needed repaired were replaced),
+//   or when the object is destroyed, etc.
+function CallsDispatcher::dropFromQueue(object, key) {
+  if( debug ) { this->dump(); }
+  if( key && this.call_queue[object] ) {
+    var call = this.call_queue[object][key];
+    if( call ) {
+      call.dropped = true;
+      if( call.assigned ) {
+        CallsDispatcher.unassignCall(call);
+      }
+      this.call_queue[object][key] = null;
+    }
+  } else if( this.call_queue[object] ) {
+    for( _, call in pairs(this.call_queue[object]) ) {
+      call.dropped = true;
+      if( call.assigned ) {
+        CallsDispatcher.unassignCall(call);
+      }
+    }
+    this.call_queue[object] = null;
+  }
+  this->onChange();
+}
+
+function CallsDispatcher.unassignCall(call) {
+  var assigned = call.assigned;
+  assert(assigned.on_call == call, "Unassigning call but the staff was not on call or a different call");
+  call.assigned = null;
+  assigned.on_call = null;
+  assigned->setNextAction(AnswerCallAction());
+}
+
+function CallsDispatcher.verifyStaffForRoom(room, attribute, staff) {
+  if( ! staff->isIdle() || ! staff->fulfillsCriterion(attribute) ) {
+    return false;
+  }
+
+  // Staff is in another room, not usable.
+  var current_room = staff->getRoom();
+  if( ! staff.hospital.policies["staff_allowed_to_move"] &&
+      current_room && current_room != room ) {
+    return false;
+  }
+
+  return true;
+}
+
+function CallsDispatcher.getPriorityForRoom(room, attribute, staff) {
+  var score = 0;
+  var x, y = room->getEntranceXY();
+
+  // Doctor prefer serving nearby rooms
+  var distance = room.world->getPathDistance(staff.tile_x, staff.tile_y, x, y);
+  if( distance ) {
+    score +=   distance;
+  }
+
+  // More people on the queue has to be served eariler
+  if( room.door.queue ) {
+    score = score - room.door.queue->reportedSize() * 5; // 5 is just a weighting scale
+    if( room.door.queue->hasEmergencyPatient() ) {
+      score = score - 200000; // Emergency on queue trumps
+    }
+  }
+
+  // Prefer the tirer staff (such that less chance to have "resting sychronization issue")
+  score = score - staff.attributes["fatigue"] * 40; // 40 is just a weighting scale
+
+  // TODO: Assign doctor with higher ability
+
+  // Room requires specilitist trumps over normal rooms
+  if( attribute == "Researcher" || attribute == "Psychiatrist" || attribute == "Surgeon" ) {
+    score -=   100000;
+  }
+
+  return score;
+}
+
+function CallsDispatcher.sendStaffToRoom(room, staff) {
+  if( staff->getRoom() == room ) {
+    room->onHumanoidLeave(staff);
+    CallsDispatcher.queueCallCheckpointAction(staff, CallsDispatcher.staffActionInterruptHandler);
+    room->onHumanoidEnter(staff);
+  } else {
+    staff->setNextAction(room->createEnterAction(staff));
+    CallsDispatcher.queueCallCheckpointAction(staff, CallsDispatcher.staffActionInterruptHandler);
+  }
+  staff->setDynamicInfoText(_S.dynamic_info.staff.actions.heading_for->format(room.room_info.name));
+}
+
+function CallsDispatcher.staffActionInterruptHandler(action, humanoid, high_priority) {
+  if( action.call.assigned == humanoid ) {
+    action.call.assigned = null;
+    humanoid.on_call = null;
+    if( ! action.call.dropped ) {
+      humanoid.world.dispatcher->callForStaff(action.call.object);
+    }
+  }
+}
+
+//! 'execute' callback for repairing an object (eg a machine).
+//!param object Object to repair.
+//!param handyman Staff to use.
+function CallsDispatcher.sendStaffToRepair(object, handyman) {
+  object->createHandymanActions(handyman);
+}
+
+//! 'execute' callback for watering a plant.
+//!param plant Plant to give water.
+//!param handyman Staff to use.
+function CallsDispatcher.sendStaffToWatering(plant, handyman) {
+  plant->createHandymanActions(handyman);
+}

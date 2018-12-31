@@ -1,0 +1,887 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var TH = require("TH");
+
+//! An `Entity` which occupies at least a single map tile and does not move.
+class ("Object") (Entity);
+
+//-@type Object
+var Object = _G["Object"];
+
+var orient_mirror = {
+  north = "west",
+  west = "north",
+  east = "south",
+  south = "east",
+};
+
+function Object::getDrawingLayer() {
+  return 4;
+}
+
+function Object::Object(world, object_type, x, y, direction, etc) {
+  var th = TH.animation();
+  this->Entity(th);
+
+  if( etc == "map object" ) {
+    if( direction % 2 == 0 ) {
+      direction = "north";
+    } else {
+      direction = "west";
+    }
+  }
+
+  this.ticks = object_type.ticks;
+  this.object_type = object_type;
+  this.world = world;
+  this.hospital = world->getLocalPlayerHospital();
+  this.user = false;
+  this.times_used = -1; // Incremented in the call on the next line
+  this->updateDynamicInfo();
+  this->initOrientation(direction);
+  this->setTile(x, y);
+}
+
+//! Initializes the footprint, finds out what to draw and checks for
+//  split animations.
+//!param direction The orientation in which the object is facing.
+function Object::initOrientation(direction) {
+  this.direction = direction;
+  var object_type = this.object_type;
+  var flags = this.init_anim_flags || 0;
+  var anim = object_type.idle_animations[direction];
+  if( ! anim ) {
+    anim = object_type.idle_animations[orient_mirror[direction]];
+    flags = 1;
+  }
+  var footprint = object_type.orientations;
+  footprint = footprint && footprint[direction];
+  if( footprint && footprint.early_list ) {
+    flags +=   1024;
+  }
+  if( footprint && footprint.list_bottom ) {
+    flags +=   2048;
+  }
+  var rap = footprint && footprint.render_attach_position;
+  if( rap && rap[1] && type(rap[1]) == "table" ) {
+    this.split_anims = {this.th};
+    this.split_anim_positions = rap;
+    this.th->setCrop(rap[1].column);
+    for( i = 2, #rap ) {
+      var point = rap[i];
+      var th = TH.animation();
+      th->setCrop(point.column);
+      th->setHitTestResult(this);
+      th->setPosition(Map->WorldToScreen(1-point[1], 1-point[2]));
+      this.split_anims[i] = th;
+    }
+  } else {
+    // Make sure these variables aren't left behind. The object
+    // might just have been moved and rotated.
+    this.split_anims = null;
+    this.split_anim_positions = null;
+  }
+  if( footprint && footprint.animation_offset ) {
+    this->setPosition(unpack(footprint.animation_offset));
+  }
+  footprint = footprint && footprint.footprint;
+  if( footprint ) {
+    this.footprint = footprint;
+  } else {
+    this.footprint = null;
+  }
+  this->setAnimation(anim, flags);
+}
+
+//! Add methods to a class for creating and controlling a slave object
+function Object.slaveMixinClass(class_method_table) {
+  var name = class.name(class_method_table);
+  var super = class.superclass(class_method_table);
+  var super_constructor = super[class.name(super)];
+
+  // Constructor
+  class_method_table[name] = function(this, world, object_type, x, y, direction, ...) {
+    super_constructor(this, world, object_type, x, y, direction, ...);
+    if( object_type.slave_id ) {
+      var orientation = object_type.orientations;
+      orientation = orientation && orientation[direction];
+      if( orientation.slave_position ) {
+        x = x + orientation.slave_position[1];
+        y = y + orientation.slave_position[2];
+      }
+      this.slave = world->newObject(object_type.slave_id, x, y, direction, ...);
+      this.slave.master = this;
+    }
+  };
+
+  // Slave -> Master redirects
+  var function slave_to_master(method) {
+    var super_method = super[method];
+    class_method_table[method] = function(this, ...) {
+      var master = this.master;
+      if( master ) {
+        return master[method](master, ...);
+      } else {
+        return super_method(this, ...);
+      }
+    };
+  }
+  slave_to_master("onClick");
+  slave_to_master("updateDynamicInfo");
+  slave_to_master("getDynamicInfo");
+
+  // Master -> Slave notifications
+  var function master_to_slave(method) {
+    var super_method = super[method];
+    class_method_table[method] = function(this, ...) {
+      var slave = this.slave;
+      if( slave ) {
+        slave[method](slave, ...);
+      }
+      return super_method(this, ...);
+    };
+  }
+  master_to_slave("initOrientation");
+  class_method_table.onDestroy = function(this, ...) {
+    var slave = this.slave;
+    if( slave ) {
+      this.world->destroyEntity(slave);
+    }
+    return super.onDestroy(this, ...);
+  };
+  class_method_table.setTile = function(this, x, y) {
+    if( this.slave ) {
+      var dx, dy = 0, 0;
+      var orientation = this.object_type.orientations;
+      orientation = orientation && orientation[this.direction];
+      if( orientation.slave_position ) {
+        dx = orientation.slave_position[1];
+        dy = orientation.slave_position[2];
+      }
+      if( x ) {
+        this.slave->setTile(x + dx, y + dy);
+      } else {
+        this.slave->setTile(x, y);
+      }
+    }
+    return super.setTile(this, x, y);
+  };
+
+  return slave_to_master, master_to_slave;
+}
+
+function Object::tick() {
+  if( this.split_anims ) {
+    if( this.num_animation_ticks ) {
+      for( i = 2, #this.split_anims ) {
+        var th = this.split_anims[i];
+        for( _ = 1, this.num_animation_ticks ) {
+          th->tick();
+        }
+      }
+    } else {
+      for( i = 2, #this.split_anims ) {
+        this.split_anims[i]->tick();
+      }
+    }
+  }
+  return Entity.tick(this);
+}
+
+function Object::setPosition(x, y) {
+  if( this.split_anims ) {
+    // The given position is for the primary tile, so position non-primary
+    // animations relative to the primary one.
+    var bx, by = unpack(this.split_anim_positions[1]);
+    for( i, th in ipairs(this.split_anims) ) {
+      var point = this.split_anim_positions[i];
+      var dx, dy = Map->WorldToScreen(1-point[1]+bx, 1-point[2]+by);
+      th->setPosition(x + dx, y + dy);
+    }
+  } else {
+    this.th->setPosition(x, y);
+  }
+  return this;
+}
+
+function Object::setAnimation(animation, flags) {
+  if( this.split_anims ) {
+    flags = (flags || 0) + DrawFlags.Crop;
+    if( this.permanent_flags ) {
+      flags = flags + this.permanent_flags;
+    }
+    if( animation != this.animation_idx || flags != this.animation_flags ) {
+      this.animation_idx = animation;
+      this.animation_flags = flags;
+      var anims = this.world.anims;
+      for( _, th in ipairs(this.split_anims) ) {
+        th->setAnimation(anims, animation, flags);
+      }
+    }
+    return this;
+  } else {
+    return Entity.setAnimation(this, animation, flags);
+  }
+}
+
+//! Get the primary tile which the object is attached to for rendering
+/*! For objects which attach to a single tile for rendering, this method will
+return the X and Y Lua world co-ordinates of that tile. For objects which split
+their rendering over multiple tiles, one of them is arbitrarily designated as
+the primary tile, and its co-ordinates are returned.
+*/
+function Object::getRenderAttachTile() {
+  var x, y = this.tile_x, this.tile_y;
+  var offset = this.object_type.orientations;
+  if( x && offset ) {
+    offset = offset[this.direction].render_attach_position;
+    if( this.split_anims ) {
+      offset = offset[1];
+    }
+    x = x + offset[1];
+    y = y + offset[2];
+  }
+  return x, y;
+}
+
+function Object::updateDynamicInfo() {
+  this.times_used = this.times_used + 1;
+  var object = this.object_type;
+  if( object.dynamic_info ) {
+    this->setDynamicInfo("text", {object.name, "", _S.dynamic_info.object.times_used->format(this.times_used)});
+  }
+}
+
+function Object::getSecondaryUsageTile() {
+  var x, y = this.tile_x, this.tile_y;
+  var offset = this.object_type.orientations;
+  if( offset ) {
+    offset = offset[this.direction].use_position_secondary;
+    x = x + offset[1];
+    y = y + offset[2];
+  }
+  return x, y;
+}
+
+// This function returns a list of all "only_passable" tiles belonging to an object.
+// It must be overridden by objects which do not have a footprint, but walkable tiles (e.g. doors of any kind)
+function Object::getWalkableTiles() {
+  var tiles = {};
+  for( _, xy in ipairs(this.footprint) ) {
+    if( xy.only_passable ) {
+      tiles[#tiles + 1] = { this.tile_x + xy[1], this.tile_y + xy[2] };
+    }
+  }
+  return tiles;
+}
+
+function Object::setTile(x, y) {
+  var function coordinatesAreInFootprint(object_footprint, xpos, ypos) {
+    for( _, xy in ipairs(object_footprint) ) {
+      if( xy[1] == xpos && xy[2] == ypos ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  var function isEmpty(table) {
+    return next(table) == null;
+  }
+
+  var function getComplementaryPassableFlag(passable_flag) {
+    if( passable_flag == "travelNorth" || passable_flag == "travelSouth" ) {
+      return passable_flag == "travelNorth" && "travelSouth" || "travelNorth";
+    } else {
+      return passable_flag == "travelEast" && "travelWest" || "travelEast";
+    }
+  }
+
+  var function setPassableFlags(passable_flag, xpos, ypos, next_x, next_y, value) {
+    var flags1 = {};
+    flags1[passable_flag] = value;
+    this.world.map.th->setCellFlags(xpos, ypos, flags1);
+    var flags2 = {};
+    flags2[getComplementaryPassableFlag(passable_flag)] = value;
+    this.world.map.th->setCellFlags(next_x, next_y, flags2);
+  }
+
+  var direction_parameters = {
+            north = { x = 0, y = -1, buildable_flag = "buildableNorth", passable_flag = "travelNorth", needed_side = "need_north_side"},
+            east = { x = 1, y = 0, buildable_flag =  "buildableEast", passable_flag = "travelEast", needed_side = "need_east_side"},
+            south = { x = 0, y = 1, buildable_flag = "buildableSouth", passable_flag = "travelSouth", needed_side = "need_south_side"},
+            west = { x = -1, y = 0, buildable_flag = "buildableWest", passable_flag = "travelWest", needed_side = "need_west_side"}
+            };
+
+  var direction = this.direction;
+  if( this.object_type.thob == 50 && direction == "east" ) {
+    direction = "west";
+  }
+
+  if( this.tile_x != null ) {
+    this.world->removeObjectFromTile(this, this.tile_x, this.tile_y);
+    if( this.footprint ) {
+      var map = this.world.map.th;
+      for( _, xy in ipairs(this.footprint) ) {
+        var xpos, ypos = this.tile_x + xy[1], this.tile_y + xy[2];
+
+        if( xy.only_side ) {
+          if( this.set_passable_flags ) {
+            this.set_passable_flags = null;
+            var par = direction_parameters[direction];
+            var passableFlag, next_tile_x, next_tile_y = par.passable_flag, xpos + par.x, ypos + par.y;
+            setPassableFlags(passableFlag, xpos, ypos, next_tile_x, next_tile_y, true);
+          }
+          var flags_to_set= {};
+          flags_to_set[direction_parameters[direction].buildable_flag] = true;
+          map->setCellFlags(xpos, ypos, flags_to_set);
+        } else {
+          var flags_to_set = {};
+          for( _, value in pairs(direction_parameters) ) {
+            if( coordinatesAreInFootprint(this.footprint, xy[1] + value.x, xy[2] + value.y) ||
+                xy.complete_cell || xy[value.needed_side] ) {
+              flags_to_set[value.buildable_flag] = true;
+            }
+          }
+
+          if( ! isEmpty(flags_to_set) ) {
+            map->setCellFlags(xpos, ypos, flags_to_set);
+          }
+          if( ! map->getCellFlags(xpos, ypos).passable ) {
+            map->setCellFlags(xpos, ypos, {
+              buildable = true,
+              passable = true,
+            });
+          } else {
+            // passable tiles can "belong" to multiple objects, so we have to check that
+            if( ! this.world->isTilePartOfNearbyObject(xpos, ypos, 10) ) {
+              // assumption: no object defines a passable tile further than 10 tiles away from its origin
+              map->setCellFlags(xpos, ypos, {
+                buildable = true,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  var entity_map = this.world.entity_map;
+  // Remove the reference to the object at it's previous coordinates
+  if( entity_map ) {
+    entity_map->removeEntity(this.tile_x,this.tile_y, this);
+  }
+
+  // Update the objects coordinates
+  this.tile_x = x;
+  this.tile_y = y;
+
+  // Update the entity map for the new position
+  if( entity_map ) {
+    entity_map->addEntity(x,y,this);
+  }
+
+  if( x ) {
+    this.th->setDrawingLayer(this->getDrawingLayer());
+    this.th->setTile(this.world.map.th, this->getRenderAttachTile());
+    this.world->addObjectToTile(this, x, y);
+    if( this.footprint ) {
+      var map = this.world.map.th;
+      var optional_found = false;
+      var room = this.world->getRoom(x, y);
+      var roomId = room && room.id;
+      var next_tile_x, next_tile_y = x,y;
+      var passable_flag;
+
+      for( _, xy in ipairs(this.footprint) ) {
+        var change_flags = true;
+        var flags_to_set = {};
+        var lx = x + xy[1];
+        var ly = y + xy[2];
+        var flags;
+
+        if( xy.optional ) {
+          if( optional_found ) {
+            // An optional tile has been accepted, we don't need anymore such tiles.
+            change_flags = false;
+          } else {
+            flags = map->getCellFlags(lx, ly);
+            var is_object_allowed = true;
+            if( roomId && flags.roomId != roomId ) {
+              is_object_allowed = false;
+            } else if( xy.only_passable && ! this.world.pathfinder->isReachableFromHospital(lx, ly) ) {
+              is_object_allowed = false;
+            }
+
+            if( is_object_allowed ) {
+              change_flags = true;
+              optional_found = true;
+            } else {
+              change_flags = false;
+            }
+          }
+        }
+
+        flags = map->getCellFlags(lx, ly);
+        if( xy.only_side ) {
+          var par = direction_parameters[direction];
+          flags_to_set[par["buildable_flag"]] = false;
+          passable_flag, next_tile_x, next_tile_y = par["passable_flag"], x + par["x"], y + par["y"];
+        } else {
+          for( _, value in pairs(direction_parameters) ) {
+            if( coordinatesAreInFootprint(this.footprint, xy[1] + value["x"], xy[2] + value["y"]) ||
+            xy.complete_cell || xy[value["needed_side"]] ) {
+              if( map->getCellFlags(x, y, flags)[value["buildable_flag"]] == 0 ) {
+                change_flags = false;
+              }
+              flags_to_set[value["buildable_flag"]] = false;
+            }
+          }
+        }
+
+        if( change_flags ) {
+          if( ! xy.only_side ) {
+            map->setCellFlags(lx, ly, {
+              buildable = false,
+              passable = ! ! xy.only_passable,
+            });
+          }
+          if( ! isEmpty(flags_to_set) ) {
+            map->setCellFlags(lx, ly, flags_to_set);
+          }
+          if( xy.only_side ) {
+            if( map->getCellFlags(lx, ly)[passable_flag] == true ) {
+              this.set_passable_flags = true;
+              setPassableFlags(passable_flag, lx, ly, next_tile_x, next_tile_y, false);
+            }
+          }
+        }
+      }
+    }
+    if( this.split_anims ) {
+      var map = this.world.map.th;
+      var pos = this.split_anim_positions;
+      for( i = 2, #this.split_anims ) {
+        this.split_anims[i]->setTile(map, x + pos[i][1], y + pos[i][2]);
+      }
+    }
+  } else {
+    this.th->setTile(null);
+    if( this.split_anims ) {
+      for( i = 2, #this.split_anims ) {
+        this.split_anims[i]->setTile(null);
+      }
+    }
+  }
+  this.world->clearCaches();
+  return this;
+}
+
+// Sets the user of this object to the given user. Note that if multiple_users_allowed
+// is set to true for this object "user" will always be the last added user to this object.
+// Please do not modify object.user directly.
+//!param user The user that is about to use this object.
+function Object::setUser(user) {
+  assert(user, "setUser: Expected a user, got nil"); // It makes no sense to add a nil value
+  this.user = user;
+  if( this.object_type.multiple_users_allowed ) {
+    if( ! this.user_list ) {
+      this.user_list = {};
+    }
+    table.insert(this.user_list, user);
+  }
+  this.th->makeInvisible();
+  this->removeReservedUser(user);
+}
+
+// Removes a user from the set of users if multiple_users_allowed is set to true for this
+// object. Otherwise it sets "user" to nil. Please don't directly change the variable "user".
+function Object::removeUser(user) {
+  if( this.object_type.multiple_users_allowed ) {
+    if( ! user || ! this.user_list ) {
+      // No user specified, empty the list; or the list didn't exist
+      this.user_list = {};
+    }
+    var found = false;
+    for( i, users in ipairs(this.user_list) ) {
+      if( users == user ) {
+        table.remove(this.user_list, i);
+        found = true;
+        break;
+      }
+    }
+    if( ! found ) {
+      this.world->gameLog("Warning: Could not find a humanoid to remove from the user list");
+    }
+    if( #this.user_list == 0 ) {
+      // No users left, make the object visible again.
+      this.user = null;
+      this.th->makeVisible();
+    }
+  } else {
+    this.user = null;
+    this.th->makeVisible();
+  }
+}
+
+// Adds a reserved user for this object. If multiple_users_allowed is set there can be
+// many users reserving the object. reserved_for will then be the user who most recently
+// reserved this object.
+function Object::addReservedUser(user) {
+  assert(user, "Expected a user, got nil"); // It makes no sense to add a nil value
+  if( this.object_type.multiple_users_allowed ) {
+    if( ! this.reserved_for_list ) {
+      this.reserved_for_list = {};
+    }
+    table.insert(this.reserved_for_list, user);
+  } else {
+    assert(! this.reserved_for || user != this.reserved_for, "Object already reserved for another user");
+  }
+  this.reserved_for = user;
+}
+
+// If multiple_users_allowed is true: Removes the user specified from this object's list of reserved users.
+// If the argument is nil it is assumed that the list should be emptied.
+// Note that if there are many humanoids reserving this object reserved_for might still be set after a
+// call to this function.
+// Otherwise: sets reserved_for to nil.
+function Object::removeReservedUser(user) {
+  if( this.object_type.multiple_users_allowed ) {
+    // No user specified, delete the whole list; or no list found, make it.
+    if( ! user || ! this.reserved_for_list ) {
+      this.reserved_for_list = {};
+    }
+    var found = false;
+    for( i, users in ipairs(this.reserved_for_list) ) {
+      if( users == user ) {
+        table.remove(this.reserved_for_list, i);
+        found = true;
+        break;
+      }
+    }
+    if( ! found ) {
+      this.world->gameLog("Warning: Could not find a humanoid to remove from the reserved user list");
+    }
+    if( #this.reserved_for_list == 0 ) {
+      // No users left, set reserved_for to nil.
+      this.reserved_for = null;
+    }
+  } else {
+    this.reserved_for = null;
+  }
+}
+
+// Checks whether the object is reserved for the specified user.
+// If the argument is nil a check for any reserved user is done.
+function Object::isReservedFor(user) {
+  if( ! user ) {
+    if( this.reserved_for_list ) {
+      return #this.reserved_for_list > 0;
+    } else {
+      return ! ! this.reserved_for;
+    }
+  }
+  if( this.reserved_for == user ) { // "Normal" use
+    return true;
+  }
+  if( this.object_type.multiple_users_allowed ) {
+    if( ! this.reserved_for_list ) {
+      this.reserved_for_list = {};
+    }
+    for( _, users in ipairs(this.reserved_for_list) ) {
+      if( users == user ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/* Called when the object is clicked
+!param ui (UI) The active ui.
+!param button (string) Which button was clicked.
+!param data (table) If some data should be retained after moving an object it is in this table.
+*/
+function Object::onClick(ui, button, data) {
+  var window = ui->getWindow(UIEditRoom);
+  if( button == "right" || (button == "left" && window && window.in_pickup_mode) ) {
+    // This flag can be used if for example some things should only happen as long as the
+    // object is not picked up. How lovely when it is so logical. :-)
+    var object_list = {{object = this.object_type, qty = 1, existing_object = this}};
+    var room = this->getRoom();
+    window = window && window.visible && window;
+    var direction = this.direction;
+    if( (! room && window) ||
+        (room && ! (window && window.room == room) && ! this.object_type.corridor_object) ||
+        (! room && ! this.object_type.corridor_object) ) {
+      return;
+    }
+
+    var fullscreen = ui->getWindow(UIFullscreen);
+    if( fullscreen ) {
+      fullscreen->close();
+    }
+
+    if( this.object_type.class == "Plant" || this.object_type.class == "Machine" ) {
+      var taskType = "watering";
+      if( this.object_type.class == "Machine" ) {
+        taskType = "repairing";
+      }
+      var index = this.hospital->getIndexOfTask(this.tile_x, this.tile_y, taskType);
+      if( index != -1 ) {
+        this.hospital->removeHandymanTask(index, taskType);
+      }
+    }
+
+    this.picked_up = true;
+    this.world->destroyEntity(this);
+    // NB: the object has to be destroyed before updating/creating the window,
+    // or the blueprint will be wrong
+    if( ! window ) {
+      window = UIPlaceObjects(ui, object_list, false); // don't pay for
+      ui->addWindow(window);
+    } else {
+      window->stopPickupItems();
+      window->addObjects(object_list, false); // don't pay for
+      window->selectObjectType(this.object_type);
+      window->checkEnableConfirm(); // since we removed an object from the room, the requirements may not be met anymore
+    }
+    window->setOrientation(direction);
+    this.orientation_before = this.direction;
+    ui->playSound("pickup.wav");
+  }
+}
+
+function Object::eraseObject() {
+  this.world.map.th->eraseObjectTypes(this.tile_x, this.tile_y);
+}
+
+function Object::resetAnimation() {
+  this.world.map.th->setCellFlags(this.tile_x, this.tile_y, {thob = this.object_type.thob});
+  this.th->setDrawingLayer(this->getDrawingLayer());
+  this.th->setTile(this.world.map.th, this->getRenderAttachTile());
+}
+
+function Object::onDestroy() {
+  var room = this->getRoom();
+  if( room ) {
+    room.objects[this] = null;
+  }
+  if( this.user_list ) {
+    for( _, user in ipairs(this.user_list) ) {
+      user->handleRemovedObject(this);
+    }
+    this.user_list = {};
+  } else if( this.user ) {
+    this.user->handleRemovedObject(this);
+  }
+  this.user = null;
+  if( this.reserved_for_list ) {
+    for( _, reserver in ipairs(this.reserved_for_list) ) {
+      reserver->handleRemovedObject(this);
+    }
+    this.reserved_for_list = {};
+  } else if( this.reserved_for ) {
+    this.reserved_for->handleRemovedObject(this);
+  }
+  this.reserved_for = null;
+
+  Entity.onDestroy(this);
+
+  // Issue 1105 - rebuild wall travel<dir> and pathfinding on side object removal
+  if( this.object_type.class == "SideObject" ) {
+    this.world.map.th->updatePathfinding();
+    this.world->resetSideObjects();
+  }
+}
+
+function Object::afterLoad(old, new) {
+  if( old < 52 ) {
+    this.hospital = this.world->getLocalPlayerHospital();
+  }
+  if( old < 57 ) {
+    if( this.footprint && this.direction ) {
+      var object_type = this.object_type;
+      var footprint = object_type.orientations;
+      footprint = footprint && footprint[this.direction];
+      if( footprint && footprint.animation_offset ) {
+        this->setPosition(unpack(footprint.animation_offset));
+      }
+      footprint = footprint && footprint.footprint;
+      this.footprint = footprint;
+      if( object_type.class == "SideObject" ) {
+        var flags = {buildable = true};
+        this.world.map.th->setCellFlags(this.tile_x, this.tile_y, flags);
+      }
+      this->setTile(this.tile_x, this.tile_y);
+    }
+  }
+  return Entity.afterLoad(this, old, new);
+}
+
+var all_pathfind_dirs = {[0] = true, [1] = true, [2] = true, [3] = true};
+
+function Object.processTypeDefinition(object_type) {
+  if( object_type.id == "extinguisher" || object_type.id == "radiator" ||
+      object_type.id == "plant" || object_type.id == "reception_desk" ||
+      object_type.id == "bench" ) {
+    object_type.count_category = object_type.id;
+  } else if( object_type.id != "bin" && ! object_type.corridor_object &&
+      ! object_type.id->find("door") ) {
+    object_type.count_category = "general";
+  }
+  if( object_type.orientations ) {
+    for( _, details in pairs(object_type.orientations) ) {
+      // Set default values
+      if( ! details.animation_offset ) {
+        details.animation_offset = {0, 0};
+      }
+      if( ! details.render_attach_position ) {
+        details.render_attach_position = {0, 0};
+      }
+      // Set the usage position
+      if( details.use_position == "passable" ) {
+        // "passable" => the *first* passable tile in the footprint list
+        for( _, point in pairs(details.footprint) ) {
+          if( point.only_passable ) {
+            details.use_position = {point[1], point[2]};
+            break;
+          }
+        }
+      } else if( ! details.use_position ) {
+        details.use_position = {0, 0};
+      }
+      // Set handyman repair tile
+      if( object_type.default_strength && ! details.handyman_position ) {
+        details.handyman_position = details.use_position;
+      }
+      // Find the nearest solid tile in the footprint to the usage position
+      var use_position = details.use_position;
+      var solid_near_use_position;
+      var solid_near_use_position_d = 10000;
+      for( _, point in pairs(details.footprint) ) { do {
+        if( point.only_passable ) {
+          break; // continue
+        }
+        var d = (point[1] - use_position[1])**2 + (point[2] - use_position[2])**2;
+        if( d >= solid_near_use_position_d ) {
+          break; // continue
+        }
+        solid_near_use_position = point;
+        solid_near_use_position_d = d;
+      } while(!( true) ); }
+      if( solid_near_use_position_d != 1 ) {
+        details.pathfind_allowed_dirs = all_pathfind_dirs;
+      } else {
+        if( use_position[1] < solid_near_use_position[1] ) {
+          details.pathfind_allowed_dirs = {[1] = true};
+        } else if( use_position[1] > solid_near_use_position[1] ) {
+          details.pathfind_allowed_dirs = {[3] = true};
+        } else if( use_position[2] < solid_near_use_position[2] ) {
+          details.pathfind_allowed_dirs = {[2] = true};
+        } else {
+          details.pathfind_allowed_dirs = {[0] = true};
+        }
+      }
+      // Adjust the footprint to make this tile the origin
+      var solid_points = {};
+      if( solid_near_use_position ) {
+        var x, y = unpack(solid_near_use_position);
+        for( _, point in pairs(details.footprint) ) {
+          point[1] = point[1] - x;
+          point[2] = point[2] - y;
+          if( ! point.only_passable ) {
+            solid_points[point[1] * 100 + point[2]] = point;
+          }
+        }
+        for( _, key in ipairs({"use_position_secondary",
+                              "finish_use_position",
+                              "finish_use_position_secondary"}) ) {
+          if( details[key] ) {
+            details[key][1] = details[key][1] - x;
+            details[key][2] = details[key][2] - y;
+          }
+        }
+        use_position[1] = use_position[1] - x;
+        use_position[2] = use_position[2] - y;
+        if( details.slave_position ) {
+          details.slave_position[1] = details.slave_position[1] - x;
+          details.slave_position[2] = details.slave_position[2] - y;
+        }
+        var rx, ry = unpack(details.render_attach_position);
+        if( type(rx) == "table" ) {
+          rx, ry = unpack(details.render_attach_position[1]);
+          for( _, point in ipairs(details.render_attach_position) ) {
+            point.column = point[1] - point[2];
+            point[1] = point[1] - x;
+            point[2] = point[2] - y;
+          }
+        } else {
+          details.render_attach_position[1] = rx - x;
+          details.render_attach_position[2] = ry - y;
+        }
+        x, y = Map->WorldToScreen(rx + 1, ry + 1);
+        details.animation_offset[1] = details.animation_offset[1] - x;
+        details.animation_offset[2] = details.animation_offset[2] - y;
+      }
+      // Find the region around the solid part of the footprint
+      var adjacent_set = {};
+      var adjacent_list = {};
+      details.adjacent_to_solid_footprint = adjacent_list;
+      for( _, point in pairs(solid_points) ) {
+        for( _, delta in ipairs({{-1, 0}, {0, -1}, {0, 1}, {1, 0}}) ) {
+          var x = point[1] + delta[1];
+          var y = point[2] + delta[2];
+          var k2 = x * 100 + y;
+          if( ! solid_points[k2] && ! adjacent_set[k2] ) {
+            adjacent_set[k2] = {x, y};
+            adjacent_list[#adjacent_list + 1] = adjacent_set[k2];
+          }
+        }
+      }
+    }
+  }
+}
+
+/* Gets the state of an object
+
+! The state can be later used to set the state of this object. This is
+useful when we would destroy and create a new object that should represent
+the same object.
+
+!return (table) state
+*/
+function Object::getState() {
+  return {times_used = this.times_used};
+}
+
+/* Sets the state of an object
+
+! This is a complement to a pair function. IT will use the generated state
+table to update it's state.
+!param state (table) table holding the state
+!return (void)
+*/
+function Object::setState(state) {
+  if( state ) {
+    this.times_used = state.times_used;
+  }
+}

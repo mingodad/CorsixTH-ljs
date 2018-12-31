@@ -1,0 +1,255 @@
+/* Copyright (c) 2010 Justin Pasher
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var room = {};
+room.id = "training";
+room.level_config_id = 22;
+room.class = "TrainingRoom";
+room.long_name = _S.rooms_long.training_room;
+room.name = _S.rooms_short.training_room;
+room.tooltip = _S.tooltip.rooms.training_room;
+room.objects_additional = { "extinguisher", "radiator", "plant", "bin", "lecture_chair", "bookcase", "skeleton" };
+room.objects_needed = { lecture_chair = 1, projector = 1 };
+room.build_preview_animation = 5086;
+room.categories = {
+  facilities = 4,
+};
+room.minimum_size = 4;
+room.wall_type = "green";
+room.floor_tile = 17;
+room.has_no_queue_dialog = true;
+
+class ("TrainingRoom") (Room);
+
+//-@type TrainingRoom
+var TrainingRoom = _G["TrainingRoom"];
+
+function TrainingRoom::TrainingRoom(...) {
+  this->Room(...);
+}
+
+function TrainingRoom::roomFinished() {
+  // Training rate and max occupancy based on objects in the room
+  var fx, fy = this->getEntranceXY(true);
+  var objects = this.world->findAllObjectsNear(fx, fy);
+  var chairs = 0;
+  var skeletons = 0;
+  var bookcases = 0;
+  for( object, _ in pairs(objects) ) {
+    if( object.object_type.id == "lecture_chair" ) {
+      ++chairs    ;
+    } else if( object.object_type.id == "skeleton" ) {
+      ++skeletons    ;
+    } else if( object.object_type.id == "bookcase" ) {
+      ++bookcases    ;
+    }
+  }
+  // Total staff occupancy: number of lecture chairs plus projector
+  this.maximum_staff = { Doctor = chairs + 1 };
+  // factor is divided by ten so the result from new algroithm will be similar to the old algorithm
+  this.training_factor = this->calculateTrainingFactor(skeletons, bookcases) / 10.0;
+
+  // Also tell the player if he/she doesn't have a consultant yet.
+  if( ! this.hospital->hasStaffOfCategory("Consultant") ) {
+    var text = _A.room_requirements.training_room_need_consultant;
+    this.world.ui.adviser->say(text);
+  }
+  Room.roomFinished(this);
+}
+
+function TrainingRoom::calculateTrainingFactor(skeletons, bookcases) {
+  // TODO: tweak/change this function, used in Staff:trainSkill(...)
+  // Object values and training rate set in level config
+  var level_config = this.world.map.level_config;
+  var proj_val = 10;
+  var book_val = 15;
+  var skel_val = 20;
+  var training_rate = 40;
+  if( level_config && level_config.gbv.TrainingRate ) {
+    book_val = level_config.gbv.TrainingValue[1];
+    skel_val = level_config.gbv.TrainingValue[2];
+    training_rate = level_config.gbv.TrainingRate;
+  }
+  // Training factor is just everything added together
+  return proj_val + skeletons*skel_val + bookcases*book_val + training_rate;
+}
+
+function TrainingRoom::getStaffCount() {
+  var count = 0;
+  for( humanoid in pairs(this.humanoids) ) {
+    if( class.is(humanoid, Staff) ) {
+      ++count    ;
+    }
+  }
+  return count;
+}
+
+function TrainingRoom::testStaffCriteria(criteria, extra_humanoid) {
+  if( extra_humanoid && extra_humanoid.profile &&
+      extra_humanoid.profile.is_consultant && this.staff_member ) {
+    // Training room can only have on consultant
+    return false;
+  }
+  return Room.testStaffCriteria(this, criteria, extra_humanoid);
+}
+
+function TrainingRoom::getTrainingFactor() {
+  return this.training_factor;
+}
+
+function TrainingRoom::getMaximumStaffCriteria() {
+  return this.maximum_staff;
+}
+
+function TrainingRoom::doStaffUseCycle(humanoid) {
+  var projector, ox, oy = this.world->findObjectNear(humanoid, "projector");
+  humanoid->queueAction(WalkAction(ox, oy));
+  var projector_use_time = math.random(6,20);
+  var loop_callback_training = /*persistable:training_loop_callback*/ function() {
+    --projector_use_time    ;
+    if( projector_use_time == 0 ) {
+      var skeleton, sox, soy = this.world->findFreeObjectNearToUse(humanoid, "skeleton", "near");
+      var bookcase, box, boy = this.world->findFreeObjectNearToUse(humanoid, "bookcase", "near");
+      if( math.random(0, 1) == 0 && bookcase ) { skeleton = null; } // choose one
+      if( skeleton ) {
+        humanoid->walkTo(sox, soy);
+        for( _ = 1, math.random(3, 10) ) {
+          humanoid->queueAction(UseObjectAction(skeleton));
+        }
+      } else if( bookcase ) {
+        humanoid->walkTo(box, boy);
+        for( _ = 1, math.random(3, 10) ) {
+          humanoid->queueAction(UseObjectAction(bookcase));
+        }
+      }
+      // go back to the projector
+      this->doStaffUseCycle(humanoid);
+    } else if( projector_use_time < 0 ) {
+      // reset variable to avoid potential overflow (over a VERY long
+      // period of time)
+      projector_use_time = 0;
+    }
+  };
+
+  humanoid->queueAction(UseObjectAction(projector)->setLoopCallback(loop_callback_training));
+}
+
+function TrainingRoom::onHumanoidEnter(humanoid) {
+  if( humanoid.humanoid_class != "Doctor" ) {
+    // use default behavior for staff other than doctors
+    return Room.onHumanoidEnter(this, humanoid);
+  }
+
+  assert(! this.humanoids[humanoid], "Humanoid entering a room that they are already in");
+  humanoid.in_room = this;
+  humanoid.last_room = this; // Remember where the staff was for them to come back after staffroom rest
+
+  //entering humanoids are no longer enroute
+  if( this.humanoids_enroute[humanoid] ) {
+    this.humanoids_enroute[humanoid] = null; // humanoid is no longer walking to this room
+  }
+
+  humanoid->setCallCompleted();
+  this->commandEnteringStaff(humanoid);
+  this.humanoids[humanoid] = true;
+  this->tryAdvanceQueue();
+}
+
+function TrainingRoom::commandEnteringStaff(humanoid) {
+  var obj, ox, oy;
+  var profile = humanoid.profile;
+
+  if( profile.humanoid_class == "Doctor" ) {
+    // Consultants try to use the projector and/or skeleton
+    if( profile.is_consultant ) {
+      obj, ox, oy = this.world->findFreeObjectNearToUse(humanoid, "projector");
+      if( this.staff_member ) {
+        if( this.waiting_staff_member ) {
+          var staff = this.waiting_staff_member;
+          staff.waiting_on_other_staff = null;
+          staff->setNextAction(this->createLeaveAction());
+          staff->queueAction(MeanderAction());
+        }
+        humanoid.waiting_on_other_staff = true;
+        humanoid->setNextAction(MeanderAction());
+        this.waiting_staff_member = humanoid;
+        this.staff_member->setNextAction(this->createLeaveAction());
+        this.staff_member->queueAction(MeanderAction());
+      } else {
+        if( obj ) {
+          obj.reserved_for = humanoid;
+          humanoid->walkTo(ox, oy);
+          this->doStaffUseCycle(humanoid);
+          this->setStaffMember(humanoid);
+        } else {
+          humanoid->setNextAction(this->createLeaveAction());
+          humanoid->queueAction(MeanderAction());
+        }
+      }
+    } else {
+      obj, ox, oy = this.world->findFreeObjectNearToUse(humanoid, "lecture_chair");
+      if( obj ) {
+        obj.reserved_for = humanoid;
+        humanoid->walkTo(ox, oy);
+        humanoid->queueAction(UseObjectAction(obj));
+        humanoid->queueAction(MeanderAction());
+      } else {
+        humanoid->setNextAction(this->createLeaveAction());
+        humanoid->queueAction(MeanderAction());
+        humanoid.last_room = null;
+      }
+    }
+  } else if( humanoid.humanoid_class != "Handyman" ) {
+    this.world.ui.adviser->say(_A.staff_place_advice.only_doctors_in_room
+    ->format(_S.rooms_long.training_room));
+    humanoid->setNextAction(this->createLeaveAction());
+    humanoid->queueAction(MeanderAction());
+    return;
+  }
+
+  return Room.commandEnteringStaff(this, humanoid, true);
+}
+
+function TrainingRoom::onHumanoidLeave(humanoid) {
+  if( humanoid.humanoid_class == "Doctor" ) {
+    // unreserve whatever it was they we using
+    var fx, fy = this->getEntranceXY(true);
+    var objects = this.world->findAllObjectsNear(fx,fy);
+    for( object, _ in pairs(objects) ) {
+      if( object.reserved_for == humanoid ) {
+        object->removeReservedUser();
+      }
+    }
+
+    if( humanoid.profile.is_consultant && humanoid == this.staff_member ) {
+      var staff = this.waiting_staff_member;
+      this->setStaffMember(null);
+      if( staff ) {
+        staff.waiting_on_other_staff = null;
+        this.waiting_staff_member = null;
+        this->commandEnteringStaff(staff);
+      }
+    }
+  }
+
+  Room.onHumanoidLeave(this, humanoid);
+}
+
+return room;

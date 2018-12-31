@@ -1,0 +1,96 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+class ("IdleAction") (HumanoidAction);
+
+//-@type IdleAction
+var IdleAction = _G["IdleAction"];
+
+function IdleAction::IdleAction() {
+  this->HumanoidAction("idle");
+  this.direction = null; // Direction of standing idle.
+  this.on_interrupt = null; // Function to call at an interrupt.
+}
+
+//! Set the direction of facing while standing idle.
+//!param direction (string) Direction of facing.
+//!return (action) Self, for daisy-chaining.
+function IdleAction::setDirection(direction) {
+  assert(direction == null ||
+      direction == "north" || direction == "south" ||
+      direction == "east" || direction == "west",
+      "Invalid value for parameter 'direction'");
+
+  this.direction = direction;
+  return this;
+}
+
+//! Set the function to call on interrupt.
+//!param on_interrupt (function) Function to call on interrupt.
+//!return (action) Self, for daisy-chaining.
+function IdleAction::setOnInterrupt(on_interrupt) {
+  assert(on_interrupt == null || type(on_interrupt) == "function",
+      "Invalid value for parameter 'on_interrupt'");
+
+  this.on_interrupt = on_interrupt;
+  return this;
+}
+
+var action_idle_interrupt = permanent("action_idle_interrupt")( function(action, humanoid) {
+  humanoid->setTimer(1, humanoid.finishAction);
+});
+
+var action_timer = permanent("action_idle_timer")( function(humanoid) {
+  var action = humanoid->getCurrentAction();
+  if( action.after_use ) {
+    action.after_use();
+    action.must_happen = true;
+  }
+  humanoid->finishAction();
+});
+
+var function action_idle_start(action, humanoid) {
+  var direction = action.direction || humanoid.last_move_direction;
+  var anims = humanoid.walk_anims;
+  if( direction == "north" ) {
+    humanoid->setAnimation(anims.idle_north, 0);
+  } else if( direction == "east" ) {
+    humanoid->setAnimation(anims.idle_east, 0);
+  } else if( direction == "south" ) {
+    humanoid->setAnimation(anims.idle_east, 1);
+  } else if( direction == "west" ) {
+    humanoid->setAnimation(anims.idle_north, 1);
+  }
+  humanoid.th->setTile(humanoid.th->getTile());
+  humanoid->setSpeed(0, 0);
+  if( action.count ) {
+    humanoid->setTimer(action.count, action_timer);
+    action.must_happen = true;
+  }
+  // If an interrupt is already specified for the idle action don't replace it
+  if( action.must_happen && ! action.on_interrupt ) {
+    action.on_interrupt = action_idle_interrupt;
+  }
+  if( action.loop_callback ) {
+    action->loop_callback(humanoid);
+  }
+}
+
+return action_idle_start;

@@ -1,0 +1,233 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var object = {};
+object.id = "reception_desk";
+object.thob = 11;
+object.class = "ReceptionDesk";
+object.name = _S.object.reception_desk;
+object.tooltip = _S.tooltip.objects.reception_desk;
+object.ticks = true;
+object.corridor_object = 1;
+object.build_preview_animation = 5060;
+object.idle_animations = {
+  north = 2062,
+  east = 2064,
+};
+object.orientations = {
+  north = {
+    footprint = { {0, 0}, {0, -1, only_passable = true},
+                  {0, 1, only_passable = true}, {1, 0, need_north_side = true, need_south_side = true},
+                  {-1, 0, need_north_side = true, need_south_side = true}
+                },
+    use_position = {0, -1},
+    use_position_secondary = {0, 1},
+  },
+  east = {
+    footprint = { {0, 0}, {0, -1, need_west_side = true, need_east_side = true},
+                  {0, 1, need_west_side = true, need_east_side = true}, {1, 0, only_passable = true},
+                  {-1, 0, only_passable = true}
+                },
+    use_position = {1, 0},
+    use_position_secondary = {-1, 0},
+  },
+  south = {
+    footprint = { {0, 0}, {0, -1, only_passable = true}, {0, 1, only_passable = true},
+                  {1, 0, need_north_side = true, need_south_side = true},
+                  {-1, 0, need_north_side = true, need_south_side = true}
+                },
+    use_position = {0, 1},
+    use_position_secondary = {0, -1},
+  },
+  west = {
+    footprint = { {0, 0}, {0, -1, need_west_side = true, need_east_side = true},
+                   {0, 1, need_west_side = true, need_east_side = true},
+                  {1, 0, only_passable = true}, {-1, 0, only_passable = true}
+                },
+    use_position = {-1, 0},
+    use_position_secondary = {1, 0},
+  },
+};
+
+corsixth.require("queue");
+
+class ("ReceptionDesk") (Object);
+
+//-@type ReceptionDesk
+var ReceptionDesk = _G["ReceptionDesk"];
+
+function ReceptionDesk::ReceptionDesk(...) {
+  this->Object(...);
+  this.queue = Queue();
+  this.queue->setBenchThreshold(3); // Keep 3 people standing in the queue even if there are benches
+  this.queue->setMaxQueue(20); // larger queues for reception desk
+  this.hover_cursor = TheApp.gfx->loadMainCursor("queue");
+  this.queue_advance_timer = 0;
+}
+
+function ReceptionDesk::onClick(ui, button) {
+  if( button == "left" ) {
+    var queue_window = UIQueue(ui, this.queue);
+    ui->addWindow(queue_window);
+  } else {
+    return Object.onClick(this, ui, button);
+  }
+}
+
+function ReceptionDesk::tick() {
+  var queue_front = this.queue->front();
+  var reset_timer = true;
+  if( this.receptionist && queue_front ) {
+    if( queue_front->getCurrentAction().name == "idle" ) {
+      this.queue_advance_timer = this.queue_advance_timer + 1;
+      reset_timer = false;
+      if( this.queue_advance_timer >= 4 + Date.hoursPerDay() * (1.0 - this.receptionist.profile.skill) ) {
+        reset_timer = true;
+        if( queue_front.next_room_to_visit ) {
+          queue_front->queueAction(SeekRoomAction(queue_front.next_room_to_visit.room_info.id));
+        } else {
+          if( class.is(queue_front, Inspector) ) {
+            var inspector = queue_front;
+            if( ! inspector.going_home  ) {
+              var epidemic = this.world->getLocalPlayerHospital().epidemic;
+              if( epidemic ) {
+                // The result of the epidemic may already by determined
+                // i.e if an infected patient has left the hospital
+                if( ! epidemic.result_determined ) {
+                  epidemic->finishCoverUp();
+                }
+                epidemic->applyOutcome();
+                inspector->goHome();
+              }
+            }
+            // VIP has his own list, don't add the gp office twice
+          } else if( queue_front.humanoid_class != "VIP" ) {
+            if( queue_front->agreesToPay("diag_gp") ) {
+              queue_front->queueAction(SeekRoomAction("gp"));
+            } else {
+              queue_front->goHome("over_priced", "diag_gp");
+            }
+          } else {
+            // the VIP will realise that he is idle, and start going round rooms
+            queue_front->queueAction(IdleAction());
+            queue_front.waiting = 1;
+          }
+        }
+        this.queue->pop();
+        this.queue.visitor_count = this.queue.visitor_count + 1;
+        queue_front.has_passed_reception = true;
+      }
+    }
+  }
+  if( reset_timer ) {
+    this.queue_advance_timer = 0;
+  }
+  return Object.tick(this);
+}
+
+//! Reception desk looks for a receptionist.
+//!return (boolean) Desk has a receptionist attached to it (may still be on her way to the desk).
+function ReceptionDesk::checkForNearbyStaff() {
+  if( this.receptionist || this.reserved_for ) {
+    // Already got staff, or a staff member is on the way
+    return true;
+  }
+
+  var nearest_staff, nearest_d;
+  var world = this.world;
+  var use_x, use_y = this->getSecondaryUsageTile();
+  for( _, entity in ipairs(this.world.entities) ) {
+    if( entity.humanoid_class == "Receptionist" && ! entity.associated_desk && ! entity.fired ) {
+      var distance = world.pathfinder->findDistance(entity.tile_x, entity.tile_y, use_x, use_y);
+      if( ! nearest_d || distance < nearest_d ) {
+        nearest_staff = entity;
+        nearest_d = distance;
+      }
+    }
+  }
+  if( ! nearest_staff ) {
+    return false;
+  }
+
+  this->occupy(nearest_staff);
+  return true;
+}
+
+// how many tiles further are we willing to walk for 1 person fewer in the queue
+var tile_factor = 10;
+function ReceptionDesk::getUsageScore() {
+  var score = this.queue->patientSize() * tile_factor;
+  // Add constant penalty if queue is full
+  if( this.queue->isFull() ) {
+    score +=   1000;
+  }
+  return score;
+}
+
+function ReceptionDesk::setTile(x, y) {
+  Object.setTile(this, x, y);
+  if( x && y ) {
+    this->checkForNearbyStaff();
+  }
+  return this;
+}
+
+function ReceptionDesk::onDestroy() {
+  this.being_destroyed = true; // temporary flag for receptionist (re-)routing logic
+  var receptionist = this.receptionist || this.reserved_for;
+  if( receptionist ) {
+    receptionist->handleRemovedObject(this);
+    this.receptionist = null;
+    this.reserved_for = null;
+
+    // Find a new reception desk for the receptionist
+    var world = receptionist.world;
+    world->findObjectNear(receptionist, "reception_desk", null, function(x, y) {
+      var obj = world->getObject(x, y, "reception_desk");
+      // Make sure we are not selecting the same desk again
+      if( obj && obj != this ) {
+        return obj->occupy(receptionist);
+      }
+    });
+  }
+  this.queue->rerouteAllPatients(SeekReceptionAction());
+
+  this.being_destroyed = null;
+  return Object.onDestroy(this);
+}
+
+/* Create orders for the specified receptionist to walk to and then staff the reception desk,
+if not already staffed or someone is on the way
+!param receptionist (Staff) the receptionist to occupy this desk
+!return true iff the receptionist was ordered to the desk
+*/
+function ReceptionDesk::occupy(receptionist) {
+  if( ! this.receptionist && ! this.reserved_for ) {
+    this.reserved_for = receptionist;
+    receptionist.associated_desk = this;
+
+    var use_x, use_y = this->getSecondaryUsageTile();
+    receptionist->setNextAction(WalkAction(use_x, use_y)->setMustHappen(true));
+    receptionist->queueAction(StaffReceptionAction(this));
+    return true;
+  }
+}
+
+return object;

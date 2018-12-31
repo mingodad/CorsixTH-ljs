@@ -1,0 +1,162 @@
+/* Copyright (c) 2009 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var TH = require("TH");
+
+var object = {};
+object.id = "litter";
+object.thob = 62; // previously unused
+object.name = _S.object.litter; // currently not shown anywhere
+object.tooltip = _S.tooltip.objects.litter; // currently not shown anywhere
+object.ticks = false;
+object.class = "Litter";
+
+var litter_types = {};
+
+// All types of "litter", i.e. small objects on the ground or walls.
+litter_types["pee"] = 2248;
+litter_types["dead_rat"] = 2242;
+litter_types["puke"] = 2060;
+litter_types["soda_can"] = 1894;
+litter_types["banana"] = 1896;
+litter_types["paper"] = 1898;
+litter_types["bottle"] = 1900;
+litter_types["soot_floor"] = 3416;
+litter_types["soot_wall"] = 3408;
+litter_types["soot_window"] = 3412;
+
+// When randomising litter, only these should come up.
+litter_types[1] = 1894;
+litter_types[2] = 1896;
+litter_types[3] = 1898;
+litter_types[4] = 1900;
+
+class ("Litter") (Entity);
+
+//-@type Litter
+var Litter = _G["Litter"];
+
+function Litter::Litter(world, object_type, x, y, direction, etc) {
+  var th = TH.animation();
+  this->Entity(th);
+  this.ticks = object_type.ticks;
+  this.object_type = object_type;
+  this.world = world;
+  this->setTile(x, y);
+}
+
+function Litter::setTile(x, y) {
+  Entity.setTile(this, x, y);
+  if( x ) {
+    this.world->addObjectToTile(this, x, y);
+  }
+}
+// Litter is an Entity and not an Object so it does not inherit this method
+// This is an (effective) hack, see issue 918 --cgj
+function Litter::getWalkableTiles() {
+  //emulate Object:getWalkableTiles() and return the tile (x,y)
+  var tiles = {};
+  tiles[0] = { this.tile_x, this.tile_y };
+  return tiles;
+}
+
+function Litter::setLitterType(anim_type, mirrorFlag) {
+  if( anim_type ) {
+    var anim = litter_types[anim_type];
+    if( anim ) {
+      this->setAnimation(anim, mirrorFlag);
+    } else {
+      error("Unknown litter type");
+    }
+    if( this->isCleanable() ) {
+      var hospital = this.world->getHospital(this.tile_x, this.tile_y);
+      hospital->addHandymanTask(this, "cleaning", 1, this.tile_x, this.tile_y);
+    }
+  }
+}
+
+//! Remove the litter from the world.
+function Litter::remove() {
+  assert(this->isCleanable());
+
+  if( this.tile_x ) {
+    this.world->removeObjectFromTile(this, this.tile_x, this.tile_y);
+
+    var hospital = this.world->getHospital(this.tile_x, this.tile_y);
+    var taskIndex = hospital->getIndexOfTask(this.tile_x, this.tile_y, "cleaning", this);
+    hospital->removeHandymanTask(taskIndex, "cleaning");
+  } else {
+    print("Warning: Removing litter that has already been removed.");
+  }
+  this.world->destroyEntity(this);
+}
+
+function Litter::getDrawingLayer() {
+  return 0;
+}
+
+function Litter::vomitInducing() {
+  var anim = this.animation_idx;
+  if( anim == litter_types["puke"] ||
+     anim == litter_types["pee"] ||
+     anim == litter_types["dead_rat"] ) {
+    return true;
+  }
+  return false;
+}
+
+function Litter::isCleanable() {
+  return this->vomitInducing() || this->anyLitter();
+}
+
+function Litter::anyLitter() {
+  var anim = this.animation_idx;
+  if( anim == litter_types["soda_can"] ||
+     anim == litter_types["banana"] ||
+     anim == litter_types["paper"] ||
+     anim == litter_types["bottle"] ) {
+    return true;
+  }
+  return false;
+}
+
+function Litter::afterLoad(old, new) {
+  if( old < 52 ) {
+    if( this.tile_x ) {
+      this.world.hospitals[1]->addHandymanTask(this, "cleaning", 1, this.tile_x, this.tile_y);
+    } else {
+      // This object was not properly removed from the world.
+      this.world->destroyEntity(this);
+    }
+  }
+  if( old < 54 ) {
+    if( ! this->isCleanable() ) {
+      var hospital = this.world->getHospital(this.tile_x, this.tile_y);
+      var taskIndex = hospital->getIndexOfTask(this.tile_x, this.tile_y, "cleaning", this);
+      hospital->removeHandymanTask(taskIndex, "cleaning");
+    }
+  }
+
+  if( old < 121 ) {
+    this.ticks = object.ticks;
+  }
+}
+
+return object;

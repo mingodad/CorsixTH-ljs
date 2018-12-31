@@ -1,0 +1,403 @@
+/* Copyright (c) 2010 Manuel "Roujin" Wolf
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Options window used in the main menu and ingame.
+class ("UIOptions") (UIResizable);
+
+//-@type UIOptions
+var UIOptions = _G["UIOptions"];
+
+var col_bg = {
+  red = 154,
+  green = 146,
+  blue = 198,
+};
+
+var col_textbox = {
+  red = 0,
+  green = 0,
+  blue = 0,
+};
+
+var col_highlight = {
+  red = 174,
+  green = 166,
+  blue = 218,
+};
+
+var col_shadow = {
+  red = 134,
+  green = 126,
+  blue = 178,
+};
+
+var col_caption = {
+  red = 174,
+  green = 166,
+  blue = 218,
+};
+
+// Private functions
+
+//- Calculates the Y position for the dialog box in the option menu
+// and increments along the current position for the next element
+// @return The Y position to place the element at
+
+function UIOptions::_getOptionYPos() {
+  // Offset from top of options box
+  var STARTING_Y_POS = 15;
+  // Y Height is 20 for panel size + 10 for spacing
+  var Y_HEIGHT = 30;
+
+  // Multiply by the index so that index=1 is at STARTING_Y_POS
+  var calculated_pos = STARTING_Y_POS + Y_HEIGHT * (this._current_option_index - 1);
+  this._current_option_index = this._current_option_index + 1;
+  return calculated_pos;
+}
+
+
+function UIOptions::UIOptions(ui, mode) {
+  this->UIResizable(ui, 320, 300, col_bg);
+
+  var app = ui.app;
+  this.mode = mode;
+  this.modal_class = mode == "menu" && "main menu" || "options";
+  this.on_top = mode == "menu";
+  this.esc_closes = true;
+  this.resizable = false;
+  this->setDefaultPosition(0.5, 0.25);
+  this.default_button_sound = "selectx.wav";
+  this.app = app;
+
+  // Tracks the current position of the object
+  this._current_option_index = 1;
+
+  // Constants for most button's width and height
+  var BTN_WIDTH = 135;
+  var BTN_HEIGHT = 20;
+
+  this->checkForAvailableLanguages();
+
+  // Set up list of resolutions
+  this.available_resolutions = {
+    {text = "640x480 (4:3)",    width = 640,  height = 480},
+    {text = "800x600 (4:3)",    width = 800,  height = 600},
+    {text = "1024x768 (4:3)",   width = 1024, height = 768},
+    {text = "1280x960 (4:3)",   width = 1280, height = 960},
+    {text = "1600x1200 (4:3)",  width = 1600, height = 1200},
+    {text = "1280x1024 (5:4)",  width = 1280, height = 1024},
+    {text = "1280x720 (16:9)",  width = 1280, height = 720},
+    {text = "1366x768 (16:9)",  width = 1366, height = 768},
+    {text = "1600x900 (16:9)",  width = 1600, height = 900},
+    {text = "1920x1080 (16:9)", width = 1920, height = 1080},
+    {text = "1280x800 (16:10)",  width = 1280, height = 800},
+    {text = "1440x900 (16:10)",  width = 1440, height = 900},
+    {text = "1680x1050 (16:10)",  width = 1680, height = 1050},
+    {text = "1920x1200 (16:10)", width = 1920, height = 1200},
+    {text = _S.options_window.custom_resolution, custom = true},
+  };
+
+  // Window parts definition
+  // Title
+  var title_y_pos = this->_getOptionYPos();
+  this->addBevelPanel(80, title_y_pos, 165, 20, col_caption)->setLabel(_S.options_window.caption)
+    .lowered = true;
+
+  // Fullscreen
+  var fullscreen_y_pos = this->_getOptionYPos();
+  this->addBevelPanel(20, fullscreen_y_pos, BTN_WIDTH, BTN_HEIGHT, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.options_window.fullscreen)->setTooltip(_S.tooltip.options_window.fullscreen).lowered = true;
+  this.fullscreen_panel =
+    this->addBevelPanel(165, fullscreen_y_pos, BTN_WIDTH, BTN_HEIGHT, col_bg)->setLabel(app.fullscreen && _S.options_window.option_on || _S.options_window.option_off);
+  this.fullscreen_button = this.fullscreen_panel->makeToggleButton(0, 0, 140, BTN_HEIGHT, null, this.buttonFullscreen)
+    ->setToggleState(app.fullscreen)->setTooltip(_S.tooltip.options_window.fullscreen_button);
+
+  // Screen resolution
+  var screen_res_y_pos = this->_getOptionYPos();
+  this->addBevelPanel(20, screen_res_y_pos, BTN_WIDTH, BTN_HEIGHT, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.options_window.resolution)->setTooltip(_S.tooltip.options_window.resolution).lowered = true;
+  this.resolution_panel = this->addBevelPanel(165, screen_res_y_pos, BTN_WIDTH, BTN_HEIGHT, col_bg)->setLabel(app.config.width .. "x" .. app.config.height);
+
+  this.resolution_button = this.resolution_panel->makeToggleButton(0, 0, BTN_WIDTH, BTN_HEIGHT, null, this.dropdownResolution)->setTooltip(_S.tooltip.options_window.select_resolution);
+
+  // Mouse capture
+  var capture_mouse_y_pos = this->_getOptionYPos();
+  this->addBevelPanel(20, capture_mouse_y_pos, BTN_WIDTH, BTN_HEIGHT, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.options_window.capture_mouse)->setTooltip(_S.tooltip.options_window.capture_mouse).lowered = true;
+
+  this.mouse_capture_panel =
+    this->addBevelPanel(165, capture_mouse_y_pos, BTN_WIDTH, BTN_HEIGHT, col_bg)->setLabel(app.config.capture_mouse && _S.options_window.option_on || _S.options_window.option_off);
+
+  this.mouse_capture_button = this.mouse_capture_panel->makeToggleButton(0, 0, BTN_WIDTH, BTN_HEIGHT, null, this.buttonMouseCapture)
+    ->setToggleState(app.config.capture_mouse)->setTooltip(_S.tooltip.options_window.capture_mouse);
+
+
+  // Language
+  // Get language name in the language to normalize display.
+  // If it doesn't exist, display the current config option.
+  var lang = this.app.strings->getLanguageNames(app.config.language);
+  if( lang ) {
+    lang = lang[1];
+  } else {
+    lang = app.config.language;
+  }
+
+  var lang_y_pos = this->_getOptionYPos();
+  this->addBevelPanel(20, lang_y_pos, BTN_WIDTH, BTN_HEIGHT, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.options_window.language)->setTooltip(_S.tooltip.options_window.language).lowered = true;
+  this.language_panel = this->addBevelPanel(165, lang_y_pos, BTN_WIDTH, BTN_HEIGHT, col_bg)->setLabel(lang);
+  this.language_button = this.language_panel->makeToggleButton(0, 0, BTN_WIDTH, BTN_HEIGHT, null, this.dropdownLanguage)->setTooltip(_S.tooltip.options_window.select_language);
+
+  // add the Audio global switch.
+  var audio_y_pos = this->_getOptionYPos();
+  this->addBevelPanel(20, audio_y_pos, BTN_WIDTH, BTN_HEIGHT, col_shadow, col_bg, col_bg)
+    ->setLabel(_S.options_window.audio)->setTooltip(_S.tooltip.options_window.audio_button).lowered = true;
+  this.volume_panel =
+    this->addBevelPanel(165, audio_y_pos, BTN_WIDTH, BTN_HEIGHT, col_bg)->setLabel(app.config.audio && _S.customise_window.option_on || _S.customise_window.option_off);
+  this.volume_button = this.volume_panel->makeToggleButton(0, 0, BTN_WIDTH, BTN_HEIGHT, null, this.buttonAudioGlobal)
+    ->setToggleState(app.config.audio)->setTooltip(_S.tooltip.options_window.audio_toggle);
+
+  // "Customise" button
+  var customise_y_pos = this->_getOptionYPos();
+  this->addBevelPanel(20, customise_y_pos, BTN_WIDTH, 30, col_bg)->setLabel(_S.options_window.customise)
+    ->makeButton(0, 0, BTN_WIDTH, 30, null, this.buttonCustomise)->setTooltip(_S.tooltip.options_window.customise_button);
+
+  // "Folders" button
+  this->addBevelPanel(165, customise_y_pos, BTN_WIDTH, 30, col_bg)->setLabel(_S.options_window.folder)
+    ->makeButton(0, 0, BTN_WIDTH, 30, null, this.buttonFolder)->setTooltip(_S.tooltip.options_window.folder_button);
+
+
+  // "Back" button
+  // Give some extra space to back button. This is fine as long as it is the last button in the options menu
+  var back_button_y_pos = this->_getOptionYPos() + 15;
+  this->addBevelPanel(20, back_button_y_pos, 280, 40, col_bg)->setLabel(_S.options_window.back)
+    ->makeButton(0, 0, 280, 40, null, this.buttonBack)->setTooltip(_S.tooltip.options_window.back);
+}
+
+// Stubs for backward compatibility
+var /*persistable:options_window_language_button*/ function language_button() { }
+var /*persistable:options_width_textbox_reset*/ function width_textbox_reset() { }
+var /*persistable:options_height_textbox_reset*/ function height_textbox_reset() { }
+
+function UIOptions::checkForAvailableLanguages() {
+  var app = this.app;
+  // Set up list of available languages
+  var langs = {};
+  for( _, lang in ipairs(app.strings.languages) ) {
+    var font = app.strings->getFont(lang);
+    if( app.gfx->hasLanguageFont(font) ) {
+      font = font && app.gfx->loadLanguageFont(font, app.gfx->loadSpriteTable("QData", "Font01V"));
+      langs[#langs + 1] = {text = lang, font = font, tooltip = _S.tooltip.options_window.language_dropdown_item->format(lang)};
+    }
+  }
+  this.available_languages = langs;
+}
+
+function UIOptions::dropdownLanguage(activate) {
+  if( activate ) {
+    this->dropdownResolution(false);
+    this.language_dropdown = UIDropdown(this.ui, this, this.language_button, this.available_languages, this.selectLanguage);
+    this->addWindow(this.language_dropdown);
+  } else {
+    this.language_button->setToggleState(false);
+    if( this.language_dropdown ) {
+      this.language_dropdown->close();
+      this.language_dropdown = null;
+    }
+  }
+}
+
+function UIOptions::selectLanguage(number) {
+  var app = this.ui.app;
+  app.config.language = (this.available_languages[number].text);
+  app->initLanguage();
+  app->saveConfig();
+}
+
+function UIOptions::dropdownResolution(activate) {
+  if( activate ) {
+    this->dropdownLanguage(false);
+    this.resolution_dropdown = UIDropdown(this.ui, this, this.resolution_button, this.available_resolutions, this.selectResolution);
+    this->addWindow(this.resolution_dropdown);
+  } else {
+    this.resolution_button->setToggleState(false);
+    if( this.resolution_dropdown ) {
+      this.resolution_dropdown->close();
+      this.resolution_dropdown = null;
+    }
+  }
+}
+
+function UIOptions::selectResolution(number) {
+  var res = this.available_resolutions[number];
+
+  var callback = /*persistable:options_resolution_callback*/ function(width, height) {
+    if( ! this.ui->changeResolution(width, height) ) {
+      var err = {_S.errors.unavailable_screen_size};
+      this.ui->addWindow(UIInformation(this.ui, err));
+    }
+    this.resolution_panel->setLabel(this.ui.app.config.width .. "x" .. this.ui.app.config.height);
+  };
+
+  if( res.custom ) {
+    this.resolution_panel->setLabel(this.ui.app.config.width .. "x" .. this.ui.app.config.height);
+    this.ui->addWindow(UIResolution(this.ui, callback));
+  } else {
+    callback(res.width, res.height);
+  }
+}
+
+function UIOptions::buttonFullscreen(checked) {
+  if( ! this.ui->toggleFullscreen() ) {
+      var err = {_S.errors.unavailable_screen_size};
+      this.ui->addWindow(UIInformation(this.ui, err));
+      this.fullscreen_button->toggle();
+  }
+  this.fullscreen_panel->setLabel(this.ui.app.fullscreen && _S.options_window.option_on || _S.options_window.option_off);
+}
+
+function UIOptions::buttonMouseCapture(checked) {
+  var app = this.ui.app;
+  app.config.capture_mouse = ! app.config.capture_mouse;
+  app->saveConfig();
+  app->setCaptureMouse();
+  this.mouse_capture_button->setLabel(app.config.capture_mouse && _S.options_window.option_on || _S.options_window.option_off);
+}
+
+function UIOptions::buttonCustomise() {
+  var window = UICustomise(this.ui, "menu");
+  this.ui->addWindow(window);
+}
+
+function UIOptions::buttonFolder() {
+  var window = UIFolder(this.ui, "menu");
+  this.ui->addWindow(window);
+}
+
+function UIOptions::buttonBrowseForTHInstall() {
+  var function callback(path) {
+    var app = TheApp;
+    app.config.theme_hospital_install = path;
+    app->saveConfig();
+    debug.getregistry()._RESTART = true;
+    app.running = false;
+  }
+  var browser = UIDirectoryBrowser(this.ui, this.mode, _S.options_window.new_th_directory, "InstallDirTreeNode", callback);
+  this.ui->addWindow(browser);
+}
+
+function UIOptions::buttonAudioGlobal(checked) {
+  var app = this.ui.app;
+  app.config.audio = ! app.config.audio;
+  app->saveConfig();
+  this.volume_button->setLabel(app.config.audio && _S.customise_window.option_on || _S.customise_window.option_off);
+  // Reinit audio
+  app.audio->stopBackgroundTrack();
+  app.audio.has_bg_music = false;
+  app.audio.not_loaded = ! app.config.audio;
+  app.audio.speech_file_name = null;
+  app.audio->init();
+  app->initLanguage();
+}
+
+function UIOptions::buttonBack() {
+  this->close();
+}
+
+function UIOptions::close() {
+  UIResizable.close(this);
+  if( this.mode == "menu" ) {
+    this.ui->addWindow(UIMainMenu(this.ui));
+  }
+}
+
+//! A custom resolution selection window
+class ("UIResolution") (UIResizable);
+
+//-@type UIResolution
+var UIResolution = _G["UIResolution"];
+
+function UIResolution::UIResolution(ui, callback) {
+  this->UIResizable(ui, 200, 140, col_bg);
+
+  var app = ui.app;
+  this.modal_class = "resolution";
+  this.on_top = true;
+  this.esc_closes = true;
+  this.resizable = false;
+  this->setDefaultPosition(0.5, 0.5);
+  this.default_button_sound = "selectx.wav";
+
+  this.callback = callback;
+
+  // Window parts definition
+  // Title
+  this->addBevelPanel(20, 10, 160, 20, col_caption)->setLabel(_S.options_window.resolution)
+    .lowered = true;
+
+  // Textboxes
+  this->addBevelPanel(20, 40, 80, 20, col_shadow, col_bg, col_bg)->setLabel(_S.options_window.width);
+  this.width_textbox = this->addBevelPanel(100, 40, 80, 20, col_textbox, col_highlight, col_shadow)
+    ->setTooltip(_S.tooltip.options_window.width)
+    ->makeTextbox()->allowedInput("numbers")->characterLimit(4)->setText(tostring(app.config.width));
+
+  this->addBevelPanel(20, 60, 80, 20, col_shadow, col_bg, col_bg)->setLabel(_S.options_window.height);
+  this.height_textbox = this->addBevelPanel(100, 60, 80, 20, col_textbox, col_highlight, col_shadow)
+    ->setTooltip(_S.tooltip.options_window.height)
+    ->makeTextbox()->allowedInput("numbers")->characterLimit(4)->setText(tostring(app.config.height));
+
+  // Apply and cancel
+  this->addBevelPanel(20, 90, 80, 40, col_bg)->setLabel(_S.options_window.apply)
+    ->makeButton(0, 0, 80, 40, null, this.ok)->setTooltip(_S.tooltip.options_window.apply);
+  this->addBevelPanel(100, 90, 80, 40, col_bg)->setLabel(_S.options_window.cancel)
+    ->makeButton(0, 0, 80, 40, null, this.cancel)->setTooltip(_S.tooltip.options_window.cancel);
+}
+
+function UIResolution::cancel() {
+  this->close(false);
+}
+
+function UIResolution::ok() {
+  var width, height = tonumber(this.width_textbox.text) || 0, tonumber(this.height_textbox.text) || 0;
+  if( width < 640 || height < 480 ) {
+    var err = {_S.errors.minimum_screen_size};
+    this.ui->addWindow(UIInformation(this.ui, err));
+  } else if( width > 3000 || height > 2000 ) {
+    this.ui->addWindow(UIConfirmDialog(this.ui,
+      _S.confirmation.maximum_screen_size,
+      /*persistable:maximum_screen_size_confirm_dialog*/function() {
+      this->close(true);
+      this->close(false);
+      }
+      ));
+  } else {
+    this->close(true);
+  }
+}
+
+//! Closes the resolution dialog
+//!param ok (boolean or nil) whether the resolution entry was confirmed (true) or aborted (false)
+function UIResolution::close(ok) {
+  UIResizable.close(this);
+  if( ok && this.callback ) {
+    this.callback(tonumber(this.width_textbox.text) || 0, tonumber(this.height_textbox.text) || 0);
+  }
+}
+

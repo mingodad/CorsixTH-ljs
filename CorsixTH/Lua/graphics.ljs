@@ -1,0 +1,650 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var TH = require("TH");
+
+var pathsep = package.config->sub(1, 1);
+var ourpath = debug.getinfo(1, "S").source->sub(2, -17);
+
+//! Layer for loading (and subsequently caching) graphical resources.
+//! The Graphics class handles loading and caching of graphics resources.
+// It can adapt as the API to C changes, and hide these changes from most of
+// the other Lua code.
+class ("Graphics");
+
+//-@type Graphics
+var Graphics = _G["Graphics"];
+
+var cursors_name = {
+  default = 1,
+  clicked = 2,
+  resize_room = 3,
+  edit_room = 4,
+  ns_arrow = 5,
+  we_arrow = 6,
+  nswe_arrow = 7,
+  move_room = 8,
+  sleep = 9,
+  kill_rat = 10,
+  kill_rat_hover = 11,
+  epidemic_hover = 12,
+  epidemic = 13,
+  grab = 14,
+  quit = 15,
+  staff = 16,
+  repair = 17,
+  patient = 18,
+  queue = 19,
+  queue_drag = 20,
+  bank = 36,
+  banksummary = 44,
+};
+var cursors_palette = {
+  [36] = "bank01v.pal",
+  [44] = "stat01v.pal",
+};
+
+function Graphics::Graphics(app) {
+  this.app = app;
+  this.target = this.app.video;
+  // The cache is used to avoid reloading an object if it is already loaded
+  this.cache = {
+    raw = {},
+    tabled = {},
+    palette = {},
+    palette_greyscale_ghost = {},
+    ghosts = {},
+    anims = {},
+    language_fonts = {},
+    cursors = setmetatable({}, {__mode = "k"}),
+  };
+
+  this.custom_graphics = {};
+  // The load info table records how objects were loaded, and is used to
+  // persist objects as instructions on how to load them.
+  this.load_info = setmetatable({}, {__mode = "k"});
+  // If the video target changes then resources will need to be reloaded
+  // (at least with some rendering engines). Note that reloading is different
+  // to loading (as in load_info), as reloading is done while the application
+  // is running, upon objects which are already loaded, whereas loading might
+  // be done with a different graphics engine, or might only need to grab an
+  // object from the cache.
+  this.reload_functions = setmetatable({}, {__mode = "k"});
+  // Cursors and fonts need to be reloaded after sprite sheets, as they are
+  // created from sprite sheets.
+  this.reload_functions_last = setmetatable({}, {__mode = "k"});
+
+  this->loadFontFile();
+
+  var graphics_folder = null;
+  if( this.app.config.use_new_graphics ) {
+    // Check if the config specifies a place to look for graphics in.
+    // Otherwise check in the default "Graphics" folder.
+    graphics_folder = this.app.config.new_graphics_folder || ourpath .. "Graphics";
+    if( graphics_folder->sub(-1) != pathsep ) {
+      graphics_folder = graphics_folder .. pathsep;
+    }
+
+    var graphics_config_file = graphics_folder .. "file_mapping.txt";
+    var result, err = loadfile_envcall(graphics_config_file);
+
+    if( ! result ) {
+      print("Warning: Failed to read custom graphics configuration:\n" .. err);
+    } else {
+      result(this.custom_graphics);
+      if( ! this.custom_graphics.file_mapping ) {
+        print("Error: An invalid custom graphics mapping file was found");
+      }
+    }
+  }
+  this.custom_graphics_folder = graphics_folder;
+}
+
+//! Tries to load the font file given in the config file as unicode_font.
+//! If it is not found it tries to find one in the operating system.
+function Graphics::loadFontFile() {
+  // Load the Unicode font, if there is one specified.
+  var font_file = this.app.config.unicode_font;
+  if( ! font_file ) {
+    // Try a font which commonly comes with the operating system.
+    var windir = os.getenv("WINDIR");
+    if( windir && windir != "" ) {
+      font_file = windir .. pathsep .. "Fonts" .. pathsep .. "ARIALUNI.TTF";
+    } else {
+      font_file = "/usr/share/fonts/truetype/arphic/uming.ttc";
+    }
+  }
+  font_file = font_file && io.open(font_file, "rb");
+  if( font_file ) {
+    this.ttf_font_data = font_file->read("*a");
+    font_file->close();
+  }
+}
+
+function Graphics::loadMainCursor(id) {
+  if( type(id) != "number" ) {
+    id = cursors_name[id];
+  }
+  if( id > 20 ) { // SPointer cursors
+    var cursor_palette = this->loadPalette("QData", cursors_palette[id]);
+    cursor_palette->setEntry(255, 0xFF, 0x00, 0xFF); // Make index 255 transparent
+    return this->loadCursor(this->loadSpriteTable("QData", "SPointer", false, cursor_palette), id - 20);
+  } else {
+    return this->loadCursor(this->loadSpriteTable("Data", "MPointer"), id);
+  }
+}
+
+function Graphics::loadCursor(sheet, index, hot_x, hot_y) {
+  var sheet_cache = this.cache.cursors[sheet];
+  if( ! sheet_cache ) {
+    sheet_cache = {};
+    this.cache.cursors[sheet] = sheet_cache;
+  }
+  var cursor = sheet_cache[index];
+  if( ! cursor ) {
+    hot_x = hot_x || 0;
+    hot_y = hot_y || 0;
+    cursor = TH.cursor();
+    if( ! cursor->load(sheet, index, hot_x, hot_y) ) {
+      cursor = {
+        draw = function(canvas, x, y) {
+          sheet->draw(canvas, index, x - hot_x, y - hot_y);
+        },
+      };
+    } else {
+      var function cursor_reloader(res) {
+        assert(res->load(sheet, index, hot_x, hot_y));
+      }
+      this.reload_functions_last[cursor] = cursor_reloader;
+    }
+    sheet_cache[index] = cursor;
+    this.load_info[cursor] = {this.loadCursor, this, sheet, index, hot_x, hot_y};
+  }
+  return cursor;
+}
+
+var function makeGreyscaleGhost(pal) {
+  var remap = {};
+  // Convert pal from a string to an array of palette entries
+  var entries = {};
+  for( i = 1, #pal, 3 ) {
+    var entry = {pal->byte(i, i + 2)}; // R, G, B at [1], [2], [3]
+    entries[(i - 1) / 3] = entry;
+  }
+  // For each palette entry, convert it to grey and then find the nearest
+  // entry in the palette to that grey.
+  for( i = 0, #entries ) {
+    var entry = entries[i];
+    var grey = entry[1] * 0.299 + entry[2] * 0.587 + entry[3] * 0.114;
+    var grey_index = 0;
+    var grey_diff = 100000; // greater than 3*63^2 (TH uses 6 bit colour channels)
+    for( j = 0, #entries ) {
+      var replace_entry = entries[j];
+      var diff_r = replace_entry[1] - grey;
+      var diff_g = replace_entry[2] - grey;
+      var diff_b = replace_entry[3] - grey;
+      var diff = diff_r * diff_r + diff_g * diff_g + diff_b * diff_b;
+      if( diff < grey_diff ) {
+        grey_diff = diff;
+        grey_index = j;
+      }
+    }
+    remap[i] = string.char(grey_index);
+  }
+  // Convert remap from an array to a string
+  return table.concat(remap, "", 0, 255);
+}
+
+function Graphics::loadPalette(dir, name) {
+  name = name || "MPalette.dat";
+  if( this.cache.palette[name] ) {
+    return this.cache.palette[name],
+      this.cache.palette_greyscale_ghost[name];
+  }
+
+  var data = this.app->readDataFile(dir || "Data", name);
+  var palette = TH.palette();
+  palette->load(data);
+  this.cache.palette_greyscale_ghost[name] = makeGreyscaleGhost(data);
+  this.cache.palette[name] = palette;
+  this.load_info[palette] = {this.loadPalette, this, dir, name};
+  return palette, this.cache.palette_greyscale_ghost[name];
+}
+
+function Graphics::loadGhost(dir, name, index) {
+  var cached = this.cache.ghosts[name];
+  if( ! cached ) {
+    var data = this.app->readDataFile(dir, name);
+    cached = data;
+    this.cache.ghosts[name] = cached;
+  }
+  return cached->sub(index * 256 + 1, index * 256 + 256);
+}
+
+function Graphics::loadRaw(name, width, height, dir, paldir, pal) {
+  if( this.cache.raw[name] ) {
+    return this.cache.raw[name];
+  }
+
+  width = width || 640;
+  height = height || 480;
+  dir = dir || "QData";
+  var data = this.app->readDataFile(dir, name .. ".dat");
+  data = data->sub(1, width * height);
+
+  var bitmap = TH.bitmap();
+  var palette;
+  if( pal && paldir ) {
+    palette = this->loadPalette(paldir, pal);
+  } else {
+    palette = this->loadPalette(dir, name .. ".pal");
+  }
+  bitmap->setPalette(palette);
+  assert(bitmap->load(data, width, this.target));
+
+  var function bitmap_reloader(bm) {
+    bm->setPalette(palette);
+    var bitmap_data = this.app->readDataFile(dir, name .. ".dat");
+    bitmap_data = bitmap_data->sub(1, width * height);
+    assert(bm->load(bitmap_data, width, this.target));
+  }
+  this.reload_functions[bitmap] = bitmap_reloader;
+
+  this.cache.raw[name] = bitmap;
+  this.load_info[bitmap] = {this.loadRaw, this, name, width, height, dir, paldir, pal};
+  return bitmap;
+}
+
+function Graphics::loadBuiltinFont() {
+  var font = this.builtin_font;
+  if( ! font ) {
+    var dat, tab, pal = TH.GetBuiltinFont();
+    var function dernc(x) {
+      if( x->sub(1, 3) == "RNC" ) {
+        return rnc.decompress(x);
+      } else {
+        return x;
+      }
+    }
+    var palette = TH.palette();
+    palette->load(dernc(pal));
+    var sheet = TH.sheet();
+    sheet->setPalette(palette);
+    sheet->load(dernc(tab), dernc(dat), true, this.target);
+    font = TH.bitmap_font();
+    font->setSheet(sheet);
+    font->setSeparation(1, 0);
+    this.load_info[font] = {this.loadBuiltinFont, this};
+    this.builtin_font = font;
+  }
+  return font;
+}
+
+function Graphics::hasLanguageFont(font) {
+  if( font == null ) {
+    // Original game fonts are always present.
+    return true;
+  } else {
+    if( ! TH.freetype_font ) {
+      // CorsixTH compiled without FreeType2 support, so even if suitable font
+      // file exists, it cannot be loaded or drawn.
+      return false;
+    }
+
+    // TODO: Handle more than one font
+
+    return ! ! this.ttf_font_data;
+  }
+}
+
+//! Font proxy meta table wrapping the C++ class.
+var font_proxy_mt = {
+  __index = {
+    sizeOf = function(this, ...) {
+      return this._proxy->sizeOf(...);
+    },
+    draw = function(this, ...) {
+      return this._proxy->draw(...);
+    },
+    drawWrapped = function(this, ...) {
+      return this._proxy->drawWrapped(...);
+    },
+    drawTooltip = function(this, ...) {
+      return this._proxy->drawTooltip(...);
+    },
+  }
+};
+
+function Graphics::onChangeLanguage() {
+  // Some fonts might need changing between bitmap and freetype
+  var load_info = this.load_info;
+  this.load_info = {}; // Any newly made objects are temporary, and shouldn't
+                      // remember reload information (also avoids insertions
+                      // into a table being iterated over).
+  for( object, info in pairs(load_info) ) {
+    if( object._proxy ) {
+      var fn = info[1];
+      var new_object = fn(unpack(info, 2));
+      object._proxy = new_object._proxy;
+    }
+  }
+  this.load_info = load_info;
+}
+
+//! Font reload function.
+//!param font The font to (force) reloading.
+var function font_reloader(font) {
+  font->clearCache();
+}
+
+//! Utility function to return preferred font for main menu ui
+function Graphics::loadMenuFont() {
+  var font;
+  if( this.language_font ) {
+    font = this->loadFont("QData", "Font01V");
+  } else {
+    font = this->loadBuiltinFont();
+  }
+  return font;
+}
+
+function Graphics::loadLanguageFont(name, sprite_table, ...) {
+  var font;
+  if( name == null ) {
+    font = this->loadFont(sprite_table, ...);
+  } else {
+    var cache = this.cache.language_fonts[name];
+    font = cache && cache[sprite_table];
+    if( ! font ) {
+      font = TH.freetype_font();
+      // TODO: Choose face based on "name" rather than always using same face.
+      font->setFace(this.ttf_font_data);
+      font->setSheet(sprite_table);
+      this.reload_functions_last[font] = font_reloader;
+
+      if( ! cache ) {
+        cache = {};
+        this.cache.language_fonts[name] = cache;
+      }
+      cache[sprite_table] = font;
+    }
+  }
+  this.load_info[font] = {this.loadLanguageFont, this, name, sprite_table, ...};
+  return font;
+}
+
+function Graphics::loadFont(sprite_table, x_sep, y_sep, ...) {
+  // Allow (multiple) arguments for loading a sprite table in place of the
+  // sprite_table argument.
+  if( type(sprite_table) == "string" ) {
+    var arg = {sprite_table, x_sep, y_sep, ...};
+    var n_pass_on_args = #arg;
+    for( i = 2, #arg ) {
+      if( type(arg[i]) == "number" ) { // x_sep
+        n_pass_on_args = i - 1;
+        break;
+      }
+    }
+    sprite_table = this->loadSpriteTable(unpack(arg, 1, n_pass_on_args));
+    if( n_pass_on_args < #arg ) {
+      x_sep, y_sep = unpack(arg, n_pass_on_args + 1, #arg);
+    } else {
+      x_sep, y_sep = null, null;
+    }
+  }
+
+  var use_bitmap_font = true;
+  if( ! sprite_table->isVisible(46) ) { // uppercase M
+    // The font doesn't contain an uppercase M, so (in all likelihood) is used
+    // for drawing special symbols rather than text, so the original bitmap
+    // font should be used.
+  } else if( this.language_font ) {
+    use_bitmap_font = false;
+  }
+  var font;
+  if( use_bitmap_font ) {
+    font = TH.bitmap_font();
+    font->setSeparation(x_sep || 0, y_sep || 0);
+    font->setSheet(sprite_table);
+  } else {
+    font = this->loadLanguageFont(this.language_font, sprite_table);
+  }
+  // A change of language might cause the font to change between bitmap and
+  // freetype, so wrap it in a proxy object which allows the actual object to
+  // be changed easily.
+  font = setmetatable({_proxy = font}, font_proxy_mt);
+  this.load_info[font] = {this.loadFont, this, sprite_table, x_sep, y_sep, ...};
+  return font;
+}
+
+function Graphics::loadAnimations(dir, prefix) {
+  if( this.cache.anims[prefix] ) {
+    return this.cache.anims[prefix];
+  }
+
+  //! Load a custom animation file (if it can be found)
+  //!param path Path to the file.
+  var function loadCustomAnims(path) {
+    var file, err = io.open(path, "rb");
+    if( ! file ) {
+      return null, err;
+    }
+    var data = file->read("*a");
+    file->close();
+    return data;
+  }
+
+  var sheet = this->loadSpriteTable(dir, prefix .. "Spr-0");
+  var anims = TH.anims();
+  anims->setSheet(sheet);
+  if( ! anims->load(
+  this.app->readDataFile(dir, prefix .. "Start-1.ani"),
+  this.app->readDataFile(dir, prefix .. "Fra-1.ani"),
+  this.app->readDataFile(dir, prefix .. "List-1.ani"),
+  this.app->readDataFile(dir, prefix .. "Ele-1.ani"))
+  ) {
+    error("Cannot load original animations " .. prefix);
+  }
+
+  if( this.custom_graphics_folder && this.custom_graphics.file_mapping ) {
+    for( _, fname in pairs(this.custom_graphics.file_mapping) ) {
+      anims->setCanvas(this.target);
+      var data, err = loadCustomAnims(this.custom_graphics_folder .. fname);
+      if( ! data ) {
+        print("Error when loading custom animations:\n" .. err);
+      } else if( ! anims->loadCustom(data) ) {
+        print("Warning: custom animations loading failed");
+      }
+    }
+  }
+
+  this.cache.anims[prefix] = anims;
+  this.load_info[anims] = {this.loadAnimations, this, dir, prefix};
+  return anims;
+}
+
+function Graphics::loadSpriteTable(dir, name, complex, palette) {
+  var cached = this.cache.tabled[name];
+  if( cached ) {
+    return cached;
+  }
+
+  var function sheet_reloader(sheet) {
+    sheet->setPalette(palette || this->loadPalette());
+    var data_tab, data_dat;
+    data_tab = this.app->readDataFile(dir, name .. ".tab");
+    data_dat = this.app->readDataFile(dir, name .. ".dat");
+    if( ! sheet->load(data_tab, data_dat, complex, this.target) ) {
+      error("Cannot load sprite sheet " .. dir .. ":" .. name);
+    }
+  }
+  var sheet = TH.sheet();
+  this.reload_functions[sheet] = sheet_reloader;
+  sheet_reloader(sheet);
+
+  if( name != "SPointer" ) {
+    this.cache.tabled[name] = sheet;
+  }
+  this.load_info[sheet] = {this.loadSpriteTable, this, dir, name, complex, palette};
+  return sheet;
+}
+
+function Graphics::updateTarget(target) {
+  this.target = target;
+  for( _, res_set in ipairs({"reload_functions", "reload_functions_last"}) ) {
+    for( resource, reloader in pairs(this[res_set]) ) {
+      reloader(resource);
+    }
+  }
+}
+
+//! Utility class for setting animation markers and querying animation length.
+class ("AnimationManager");
+
+//-@type AnimationManager
+var AnimationManager = _G["AnimationManager"];
+
+function AnimationManager::AnimationManager(anims) {
+  this.anim_length_cache = {};
+  this.anims = anims;
+}
+
+//! For overriding animations which have builtin repeats or excess frames
+function AnimationManager::setAnimLength(anim, length) {
+  this.anim_length_cache[anim] = length;
+}
+
+function AnimationManager::getAnimLength(anim) {
+  var anims = this.anims;
+  if( ! this.anim_length_cache[anim] ) {
+    var length = 0;
+    var seen = {};
+    var frame = anims->getFirstFrame(anim);
+    while( ! seen[frame] ) {
+      seen[frame] = true;
+      ++length    ;
+      frame = anims->getNextFrame(frame);
+    }
+    this.anim_length_cache[anim] = length;
+  }
+  return this.anim_length_cache[anim];
+}
+
+/* Markers can be set using a variety of different arguments:
+  setMarker(anim_number, position)
+  setMarker(anim_number, start_position, end_position)
+  setMarker(anim_number, keyframe_1, keyframe_1_position, keyframe_2, ...)
+
+  position should be a table; {x, y} for a tile position, {x, y, "px"} for a
+  pixel position, with (0, 0) being the origin in both cases.
+
+  The first variant of setMarker sets the same marker for each frame.
+  The second variant does linear interpolation of the two positions between
+  the first frame and the last frame.
+  The third variant does linear interpolation between keyframes, and then the
+  final position for frames after the last keyframe. The keyframe arguments
+  should be 0-based integers, as in the animation viewer.
+
+  To set the markers for multiple animations at once, the anim_number argument
+  can be a table, in which case the marker is set for all values in the table.
+  Alternatively, the values function (defined in utility.lua) can be used in
+  conjection with a for loop to set markers for multiple things.
+--*/
+
+function AnimationManager::setMarker(anim, ...) {
+  return this->setMarkerRaw(anim, "setFrameMarker", ...);
+}
+
+var function TableToPixels(t) {
+  if( t[3] == "px" ) {
+    return t[1], t[2];
+  } else {
+    var x, y = Map->WorldToScreen(t[1] + 1, t[2] + 1);
+    return math.floor(x), math.floor(y);
+  }
+}
+
+function AnimationManager::setMarkerRaw(anim, fn, arg1, arg2, ...) {
+  if( type(anim) == "table" ) {
+    for( _, val in pairs(anim) ) {
+      this->setMarkerRaw(val, fn, arg1, arg2, ...);
+    }
+    return;
+  }
+  var tp_arg1 = type(arg1);
+  var anim_length = this->getAnimLength(anim);
+  var anims = this.anims;
+  var frame = anims->getFirstFrame(anim);
+  if( tp_arg1 == "table" ) {
+    if( arg2 ) {
+      // Linear-interpolation positions
+      var x1, y1 = TableToPixels(arg1);
+      var x2, y2 = TableToPixels(arg2);
+      for( i = 0, anim_length - 1 ) {
+        var n = math.floor(i / (anim_length - 1));
+        anims[fn](anims, frame, (x2 - x1) * n + x1, (y2 - y1) * n + y1);
+        frame = anims->getNextFrame(frame);
+      }
+    } else {
+      // Static position
+      var x, y = TableToPixels(arg1);
+      for( _ = 1, anim_length ) {
+        anims[fn](anims, frame, x, y);
+        frame = anims->getNextFrame(frame);
+      }
+    }
+  } else if( tp_arg1 == "number" ) {
+    // Keyframe positions
+    var f1, x1, y1 = 0, 0, 0;
+    var args;
+    if( arg1 == 0 ) {
+      x1, y1 = TableToPixels(arg2);
+      args = {...};
+    } else {
+      args = {arg1, arg2, ...};
+    }
+    var f2, x2, y2;
+    var args_i = 1;
+    for( f = 0, anim_length - 1 ) {
+      if( f2 && f == f2 ) {
+        f1, x1, y1 = f2, x2, y2;
+        f2, x2, y2 = null, null, null;
+      }
+      if( ! f2 ) {
+        f2 = args[args_i];
+        if( f2 ) {
+          x2, y2 = TableToPixels(args[args_i + 1]);
+          args_i +=   2;
+        }
+      }
+      if( f2 ) {
+        var n = math.floor((f - f1) / (f2 - f1));
+        anims[fn](anims, frame, (x2 - x1) * n + x1, (y2 - y1) * n + y1);
+      } else {
+        anims[fn](anims, frame, x1, y1);
+      }
+      frame = anims->getNextFrame(frame);
+    }
+  } else if( tp_arg1 == "string" ) {
+    error("TODO");
+  } else {
+    error("Invalid arguments to setMarker", 2);
+  }
+}

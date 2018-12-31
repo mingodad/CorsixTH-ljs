@@ -1,0 +1,156 @@
+/* Copyright (c) 2010-2014 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+//! Custom Game Window
+class ("UICustomGame") (UIMenuList);
+
+//-@type UICustomGame
+var UICustomGame = _G["UICustomGame"];
+
+var col_scrollbar = {
+  red = 164,
+  green = 156,
+  blue = 208,
+};
+
+var details_width = 280;
+
+//! Compile metainfo for all of the levels in the given path.
+//!param path (string) The path that should contain level files.
+//!param items (table) Table to insert the level metadata into.
+var findLevelsInDir = function(path, items) {
+  for( file in lfs.dir(path) ) {
+    if( file->match("%.level$") ) {
+      var level_info = TheApp->readLevelFile(file);
+      if( level_info.name && level_info.map_file ) {
+        items[#items + 1] = {
+          name = level_info.name,
+          tooltip = _S.tooltip.custom_game_window.choose_game,
+          map_file = level_info.map_file,
+          level_file = file,
+          intro = level_info.briefing,
+          deprecated_variable_used = level_info.deprecated_variable_used,
+        };
+      }
+    }
+  }
+};
+
+function UICustomGame::UICustomGame(ui) {
+  this.label_font = TheApp.gfx->loadFont("QData", "Font01V");
+
+  // Supply the required list of items to UIMenuList
+  // Create the actual list
+  var items = {};
+  findLevelsInDir(TheApp.level_dir, items);
+  findLevelsInDir(TheApp.user_level_dir, items);
+  this->UIMenuList(ui, "menu", _S.custom_game_window.caption, items, 10, details_width + 40);
+
+  // Create a toolbar ready to be used if the description for a level is
+  // too long to fit
+  var scrollbar_base = this->addBevelPanel(560, 40, 20, this.num_rows*17, this.col_bg);
+  scrollbar_base.lowered = true;
+  this.details_scrollbar = scrollbar_base->makeScrollbar(col_scrollbar, /*persistable:menu_list_details_scrollbar_callback*/ function() {
+    this->updateDescriptionOffset();
+  }, 1, 1, this.num_rows);
+
+  this.description_offset = 0;
+
+  // Now add the free build button beside the list.
+  if( ! pcall(function() {
+    var palette = ui.app.gfx->loadPalette("QData", "DrugN01V.pal");
+    this.panel_sprites = ui.app.gfx->loadSpriteTable("QData", "DrugN02V", true, palette);
+    this.border_sprites = ui.app.gfx->loadSpriteTable("Bitmap", "aux_ui", true);
+  }) ) {
+    this->close();
+    return;
+  }
+
+  this->addBevelPanel(280, 230, 140, 20, this.col_bg)->setLabel(_S.custom_game_window.free_build).lowered = true;
+  var button =  this->addPanel(12, 430, 225)->makeToggleButton(0, 0, 29, 29, 11, this.buttonFreebuild)
+    ->setTooltip(_S.tooltip.custom_game_window.free_build);
+  if( this.ui.app.config.free_build_mode ) {
+    button->toggle();
+  }
+
+  // Finally the load button
+  this->addBevelPanel(480, 220, 100, 40, this.col_bg)
+    ->setLabel(_S.custom_game_window.load_selected_level)
+    ->makeButton(0, 0, 100, 40, 11, this.buttonLoadLevel)
+    ->setTooltip(_S.tooltip.custom_game_window.load_selected_level);
+}
+
+function UICustomGame::updateDescriptionOffset() {
+  this.description_offset = this.details_scrollbar.value - 1;
+}
+
+// Overrides the function in the UIMenuList, choosing what should happen when the player
+// clicks a choice in the list.
+function UICustomGame::buttonClicked(num) {
+  var item = this.items[num + this.scrollbar.value - 1];
+  this.chosen_index = num;
+  this.chosen_level_name = item.name;
+  this.chosen_level_description = item.intro;
+  if( this.chosen_level_description ) {
+    var _, y, rows = this.label_font->sizeOf(this.chosen_level_description, details_width);
+    var row_height = y / rows;
+    this.max_rows_shown = math.floor(this.num_rows*17 / row_height);
+    this.details_scrollbar->setRange(1, rows, math.min(rows, this.max_rows_shown), 1);
+  } else {
+    this.details_scrollbar->setRange(1, 1, 1, 1);
+  }
+  this.description_offset = 0;
+
+  if( item.deprecated_variable_used ) {
+    this.ui->addWindow(UIInformation(this.ui, {_S.warnings.levelfile_variable_is_deprecated->format(item.name)}));
+  }
+}
+
+function UICustomGame::buttonLoadLevel() {
+  if( this.chosen_index ) {
+    // First make sure the map file exists.
+    var item = this.items[this.chosen_index + this.scrollbar.value - 1];
+    var app = this.ui.app;
+    var _, errors = app->readMapDataFile(item.map_file);
+    if( errors ) {
+      this.ui->addWindow(UIInformation(this.ui, {errors}));
+      return;
+    }
+    app->loadLevel(item.level_file, null, this.chosen_level_name, item.map_file, this.chosen_level_description);
+  }
+}
+
+function UICustomGame::buttonFreebuild(checked) {
+  this.ui.app.config.free_build_mode = checked;
+}
+
+function UICustomGame::draw(canvas, x, y) {
+  UIMenuList.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+
+  if( this.chosen_level_name ) {
+    this.label_font->drawWrapped(canvas, this.chosen_level_name,
+                                x + 270, y + 10, details_width);
+  }
+  if( this.chosen_level_description ) {
+    this.label_font->drawWrapped(canvas, this.chosen_level_description,
+              x + 270, y + 40, details_width, null, this.max_rows_shown, this.description_offset);
+  }
+}

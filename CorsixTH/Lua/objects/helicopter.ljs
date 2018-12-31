@@ -1,0 +1,98 @@
+/* Copyright (c) 2009 Edvin "Lego3" Linge
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var object = {};
+object.id = "helicopter";
+object.thob = 63;
+object.name = "helicopter"; // Not seen anywhere
+object.class = "Helicopter";
+object.ticks = true;
+object.idle_animations = {
+  north = 2456,
+};
+object.orientations = {
+  north = {
+    // Helicopter is outside the hospital, so does not need a footprint
+    footprint = {}
+  },
+};
+
+//! An `Object` which drops of emergency patients.
+class ("Helicopter") (Object);
+
+//-@type Helicopter
+var Helicopter = _G["Helicopter"];
+
+function Helicopter::Helicopter(world, object_type, hospital, direction, etc) {
+  var x, y = hospital->getHeliportPosition();
+  // Helicoptor needs to land below tile to be positioned correctly
+  ++y    ;
+  this->Object(world, object_type, x, y, direction, etc);
+  this.th->makeInvisible();
+  this->setPosition(0, -600);
+  this.phase = -60;
+  this.hospital = hospital;
+  // TODO: Shadow: 3918
+  hospital.emergency_patients = {};
+}
+
+function Helicopter::tick() {
+  var phase = this.phase;
+  if( phase == 0 ) {
+    this.th->makeVisible();
+    this->setSpeed(0, 10);
+  } else if( phase == 60 ) {
+    this->setSpeed(0, 0);
+    this.spawned_patients = 0;
+  } else if( phase == 80 ) {
+    if( this.spawned_patients < this.hospital.emergency.victims ) {
+      this->spawnPatient();
+      phase = 60;
+    }
+  } else if( phase ==  87 ) {
+    this->setSpeed(0, -10);
+  } else if( phase == 147 ) {
+    this.world->destroyEntity(this);
+  }
+  this.phase = phase + 1;
+  Object.tick(this);
+}
+
+//! When the helicopter has landed this method is called each time a patient should spawn from it.
+function Helicopter::spawnPatient() {
+  var hospital = this.hospital;
+  this.spawned_patients = this.spawned_patients + 1;
+  var patient = this.world->newEntity("Patient", 2);
+  patient->setDisease(hospital.emergency.disease);
+  patient.diagnosis_progress = 1;
+  patient->setDiagnosed();
+  patient->setMood("emergency", "activate");
+  patient.is_emergency = this.spawned_patients;
+  hospital.emergency_patients[#hospital.emergency_patients + 1] = patient;
+  var x, y = hospital->getHeliportSpawnPosition();
+  patient->setNextAction(SpawnAction("spawn", {x = x, y = y})->setOffset({y = 1}));
+  patient->setHospital(hospital);
+  // TODO: If new combined diseases are added this will not work correctly anymore.
+  patient.cure_rooms_visited = #patient.disease.treatment_rooms - 1;
+  var no_of_rooms = #patient.disease.treatment_rooms;
+  patient->queueAction(SeekRoomAction(patient.disease.treatment_rooms[no_of_rooms]));
+}
+
+return object;

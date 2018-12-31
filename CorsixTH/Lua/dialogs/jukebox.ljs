@@ -1,0 +1,174 @@
+/* Copyright (c) 2009 Peter "Corsix" Cawley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. --*/
+
+var ipairs
+    = ipairs;
+
+class ("UIJukebox") (Window);
+
+//-@type UIJukebox
+var UIJukebox = _G["UIJukebox"];
+
+function UIJukebox::UIJukebox(app) {
+  this->Window();
+  this.modal_class = "jukebox";
+  this.esc_closes = true;
+  this.audio = app.audio;
+  this.app = app;
+  this.ui = app.ui;
+  this.width = 259;
+  this.height = 74 + 30 * #this.audio.background_playlist + 18;
+  this->setDefaultPosition(26, 26);
+  this.panel_sprites = app.gfx->loadSpriteTable("QData", "Req13V", true);
+  this.white_font = app.gfx->loadFont("QData", "Font01V");
+  this.blue_font = app.gfx->loadFont("QData", "Font02V");
+
+  // Dialog head (current track title & exit button)
+  this->addPanel(389, 0, 0);
+  for( x = 30, this.width - 61, 24 ) {
+    this->addPanel(390, x, 0);
+  }
+  this->addPanel(391, this.width - 61, 0);
+  this->addPanel(409, this.width - 42, 19)->makeButton(0, 0, 24, 24, 410, this.close)->setTooltip(_S.tooltip.jukebox.close);
+
+  this.play_btn =
+  this->addPanel(392,   0, 49)->makeToggleButton(19, 2, 50, 24, 393, this.togglePlayPause)->setSound("selectx.wav")->setTooltip(_S.tooltip.jukebox.play);
+  this->updatePlayButton();
+  this->addPanel(394,  87, 49)->makeButton(0, 2, 24, 24, 395, this.audio.playPreviousBackgroundTrack, this.audio)->setSound("selectx.wav")->setTooltip(_S.tooltip.jukebox.rewind);
+  this->addPanel(396, 115, 49)->makeButton(0, 2, 24, 24, 397, this.audio.playNextBackgroundTrack, this.audio)->setSound("selectx.wav")->setTooltip(_S.tooltip.jukebox.fast_forward);
+  this->addPanel(398, 157, 49)->makeButton(0, 2, 24, 24, 399, this.stopBackgroundTrack)->setSound("selectx.wav")->setTooltip(_S.tooltip.jukebox.stop);
+  this->addPanel(400, 185, 49)->makeButton(0, 2, 24, 24, 401, this.loopTrack)->setSound("selectx.wav")->setTooltip(_S.tooltip.jukebox.loop);
+
+  // Track list
+  this.track_buttons = {};
+  for( i, info in ipairs(this.audio.background_playlist) ) {
+    var y = 47 + i * 30;
+    this->addPanel(402, 0, y);
+    for( x = 30, this.width - 61, 24 ) {
+      this->addPanel(403, x, y);
+    }
+    this.track_buttons[i] = this->addPanel(404, this.width - 61, y)->makeToggleButton(19, 4, 24, 24, 405)->setSound("selectx.wav");
+    if( ! info.enabled ) {
+      this.track_buttons[i]->toggle();
+    }
+    this.track_buttons[i].on_click = /*persistable:jukebox_toggle_track*/ function(window, off) {
+      window->toggleTrack(i, info, ! off);
+    };
+  }
+
+  // Dialog footer
+  var y = 74 + 30 * #this.audio.background_playlist;
+  this->addPanel(406, 0, y);
+  for( x = 30, this.width - 61, 24 ) {
+    this->addPanel(407, x, y);
+  }
+  this->addPanel(408, this.width - 61, y);
+
+  this->makeTooltip(_S.tooltip.jukebox.current_title, 17, 17, 212, 46);
+}
+
+// makes the play button consistent with the current status of the background music
+// running -> toggled
+// stopped -> not toggled
+// paused  -> not toggled
+function UIJukebox::updatePlayButton() {
+  var status = ! ! this.audio.background_music && ! this.audio.background_paused;
+  if( status != this.play_btn.toggled ) {
+    this.play_btn->toggle();
+  }
+}
+
+function UIJukebox::togglePlayPause() {
+  if( ! this.audio.background_music ) {
+    // Update configuration that we want music now.
+    this.app.config.play_music = true;
+    this.app->saveConfig();
+    this.audio->playRandomBackgroundTrack();
+  } else {
+    this.audio->pauseBackgroundTrack();
+    // Just pausing does not imply that the player will want to have music turned off
+    // the next time he or she starts the game.
+  }
+}
+
+function UIJukebox::stopBackgroundTrack() {
+  // Pressing this button means that the player doesn't want any
+  // background music in the future, so set that config flag.
+  this.app.config.play_music = false;
+  this.app->saveConfig();
+  this.audio->stopBackgroundTrack();
+}
+
+function UIJukebox::toggleTrack(index, info, on) {
+  info.enabled = on;
+  if( ! on && this.audio.background_music == info.music ) {
+    this.audio->stopBackgroundTrack();
+    this.audio->playRandomBackgroundTrack();
+  }
+}
+
+function UIJukebox::loopTrack() {
+  var index = this.audio->findIndexOfCurrentTrack();
+  var playlist = this.audio.background_playlist;
+
+  if( playlist[index].loop ) {
+    playlist[index].loop = false;
+
+    for( i, list_entry in ipairs(playlist) ) {
+      if( list_entry.enabled_before_loop && index != i ) {
+        list_entry.enabled_before_loop = null;
+        this->toggleTrack(i, list_entry, true);
+        this.track_buttons[i]->toggle();
+      }
+    }
+  } else {
+    playlist[index].loop = true;
+
+    for( i, list_entry in ipairs(playlist) ) {
+      if( list_entry.enabled && index != i ) {
+        list_entry.enabled_before_loop = true;
+        this->toggleTrack(i, list_entry, false);
+        this.track_buttons[i]->toggle();
+      }
+    }
+  }
+}
+
+function UIJukebox::draw(canvas, x, y) {
+  Window.draw(this, canvas, x, y);
+  x, y = this.x + x, this.y + y;
+
+  var playing = this.audio.background_music || "";
+  for( i, info in ipairs(this.audio.background_playlist) ) {
+    var ypos = y + 47 + i * 30;
+    var font = this.white_font;
+    if( info.music == playing ) {
+      font = this.blue_font;
+    }
+    var str = info.title;
+    while( font->sizeOf(str) > 185 ) {
+      str = string.sub(str, 1, string.len(str) - 5) .. "...";
+    }
+    font->draw(canvas, str, x + 24, ypos + 11);
+    if( info.music == playing ) {
+      font->draw(canvas, str, x + 24, this.y + 27);
+    }
+  }
+}
